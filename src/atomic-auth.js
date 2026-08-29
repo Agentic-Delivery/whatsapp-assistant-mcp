@@ -29,7 +29,11 @@ export async function useAtomicAuthState(folder, baileys) {
   const { initAuthCreds, BufferJSON, proto } = baileys;
   fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
 
-  const fileFor = (name) => path.join(folder, `${name.replace(/\//g, '__').replace(/:/g, '-')}.json`);
+  // Key names come from Baileys' own signal store (fixed categories + protocol-
+  // constrained ids), but a filename builder should not have to trust that:
+  // neutralize every path-meaningful character, including backslash (a
+  // separator on Windows even though Linux is the supported platform).
+  const fileFor = (name) => path.join(folder, `${name.replace(/[\/\\]/g, '__').replace(/:/g, '-').replace(/^\.+/, '_')}.json`);
   const creds = readJson(fileFor('creds'), BufferJSON.reviver) || initAuthCreds();
 
   return {
