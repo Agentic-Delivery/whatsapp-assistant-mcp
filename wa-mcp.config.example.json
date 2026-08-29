@@ -1,0 +1,14 @@
+{
+  "chats": [
+    {
+      "jid": "REPLACE-WITH-REAL-JID@s.whatsapp.net",
+      "name": "Example contact -- read only",
+      "canPost": false
+    },
+    {
+      "jid": "REPLACE-WITH-REAL-GROUP-JID@g.us",
+      "name": "Example group -- read only",
+      "canPost": false
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+node_modules
+*.log
+.DS_Store
+
+# Local runtime state normally lives under ~/.whatsapp-assistant, never in this
+# repo -- these entries are defensive, in case anything ends up here during
+# local development.
+auth/
+inbox.jsonl
+outbox.jsonl
+wa-mcp.config.json
+cursor.json
+chats-catalog.json
