@@ -5,6 +5,26 @@ on:
   pull_request:
 
 jobs:
+  # Fails the build if any commit in history carries a placeholder git
+  # identity (an unconfigured machine stamps "Test <test@test.com>" or
+  # similar) — keeps authorship on the contributors page intentional.
+  identity-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No placeholder identities in history
+        run: |
+          bad=$(git log --format='%an <%ae>%n%cn <%ce>' | sort -u | grep -iE '^test <|test@test\.com|example\.com>' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::placeholder git identity found in commit history:"
+            echo "$bad"
+            echo "Fix your git config (user.name / user.email) and rewrite the offending commits."
+            exit 1
+          fi
+          echo "identity check passed"
+
   test:
     runs-on: ubuntu-latest
     strategy:
