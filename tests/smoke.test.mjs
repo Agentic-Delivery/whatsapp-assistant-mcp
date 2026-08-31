@@ -100,6 +100,34 @@ test('(d) the daemon signs every outgoing message with the agent marker — a sh
   assert.match(String(sentText), /^\u{1F916} hello there$/u, 'outgoing text must carry the mechanical agent signature');
 });
 
+test('(e) send-file ships the document with a SIGNED caption; canPost:false refuses it', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = '5555555555@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid, name: 'Docs', canPost: true }] });
+
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+
+  const path2 = await import('node:path');
+  const filePath = path2.join(home, 'doc.pdf');
+  fs.writeFileSync(filePath, 'pdf-bytes');
+  await handleSendCommand({ ts: Date.now(), type: 'send-file', jid, path: filePath, fileName: 'doc.pdf', caption: 'first version', nonce: 'f1' }, loadConfig());
+
+  const sent = createdSockets.at(-1).__sent.at(-1);
+  assert.ok(sent.content?.document, 'a document payload must be sent');
+  assert.equal(sent.content.fileName, 'doc.pdf');
+  assert.match(String(sent.content.caption), /^\u{1F916} first version$/u, 'caption must carry the mechanical agent signature');
+
+  const noPostJid = '6666666666@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid: noPostJid, name: 'ReadOnly', canPost: false }] });
+  const before = createdSockets.at(-1).__sent.length;
+  await handleSendCommand({ ts: Date.now(), type: 'send-file', jid: noPostJid, path: filePath, fileName: 'doc.pdf', nonce: 'f2' }, loadConfig());
+  assert.equal(createdSockets.at(-1).__sent.length, before, 'a canPost:false chat must never receive a document');
+});
+
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
   const home = useTempHome();
   process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
