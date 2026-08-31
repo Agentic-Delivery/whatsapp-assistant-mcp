@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
-import { connect, appendInbox, sendText, readNewLines, outboxPath, daemonLogPath, waHome } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, readNewLines, outboxPath, daemonLogPath, waHome } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -47,9 +47,18 @@ export async function handleSendCommand(cmd, config) {
       // name is what WhatsApp shows on every message — the ONLY separation
       // between the human and the agent is this marker, so the daemon (the one
       // process that touches WhatsApp) stamps it; no send path can skip it.
+      // Applies to text messages AND document captions alike.
       const SIG = process.env.WA_AGENT_SIG || "\u{1F916} ";
-      const signed = text.startsWith(SIG) ? text : SIG + text;
-      const msgId = await sendText(jid, signed);
+      let msgId;
+      if (cmd.type === 'send-file') {
+        const fs2 = await import('node:fs');
+        if (!cmd.path || !fs2.existsSync(cmd.path)) throw new Error(`file not found: ${cmd.path}`);
+        const cap = cmd.caption ? (cmd.caption.startsWith(SIG) ? cmd.caption : SIG + cmd.caption) : undefined;
+        msgId = await sendDocument(jid, cmd.path, cmd.fileName || 'document', cap);
+      } else {
+        const signed = text.startsWith(SIG) ? text : SIG + text;
+        msgId = await sendText(jid, signed);
+      }
       ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId };
     } catch (err) {
       ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: false, error: String(err?.message || err) };
@@ -80,7 +89,7 @@ function startOutboxWatcher(config) {
       const { entries, newOffset } = readNewLines(outbox, offset);
       offset = newOffset;
       for (const cmd of entries) {
-        if (cmd?.type !== 'send') continue;
+        if (cmd?.type !== 'send' && cmd?.type !== 'send-file') continue;
         await handleSendCommand(cmd, config);
       }
     } catch (err) {

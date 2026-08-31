@@ -286,6 +286,22 @@ export async function sendText(jid, text) {
   return result?.key?.id || null;
 }
 
+/** Sends a document from a local file path. Caption is optional. Same one-connection
+ *  rule as sendText: only the daemon process may call this. */
+export async function sendDocument(jid, filePath, fileName, caption) {
+  if (!sockRef) {
+    throw new Error('No active WhatsApp connection. sendDocument() must run inside the daemon process.');
+  }
+  const buffer = fs.readFileSync(filePath);
+  const result = await sockRef.sendMessage(jid, {
+    document: buffer,
+    mimetype: fileName.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream',
+    fileName,
+    ...(caption ? { caption } : {}),
+  });
+  return result?.key?.id || null;
+}
+
 /**
  * Establishes the one shared Baileys connection.
  *
