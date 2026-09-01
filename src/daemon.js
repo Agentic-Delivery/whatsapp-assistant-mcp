@@ -82,7 +82,13 @@ export async function handleSendCommand(cmd, config) {
         const fs2 = await import('node:fs');
         if (!cmd.path || !fs2.existsSync(cmd.path)) throw new Error(`file not found: ${cmd.path}`);
         const cap = cmd.caption ? (cmd.caption.startsWith(SIG) ? cmd.caption : SIG + cmd.caption) : undefined;
-        msgId = await sendDocument(jid, cmd.path, cmd.fileName || 'document', cap);
+        // The file name is what the recipient's client uses to open the file: a
+        // nameless/extension-less document arrives as an unopenable blob even when
+        // the bytes are perfect (mimetype derives from the extension). Never fall
+        // back to a bare literal — the file's own basename always carries its
+        // extension. Both key spellings are accepted; the contract is fileName.
+        const fileName = cmd.fileName || cmd.filename || path.basename(cmd.path);
+        msgId = await sendDocument(jid, cmd.path, fileName, cap);
       } else {
         const signed = text.startsWith(SIG) ? text : SIG + text;
         msgId = await sendText(jid, signed);

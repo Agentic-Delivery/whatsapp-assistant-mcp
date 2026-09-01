@@ -128,6 +128,31 @@ test('(e) send-file ships the document with a SIGNED caption; canPost:false refu
   assert.equal(createdSockets.at(-1).__sent.length, before, 'a canPost:false chat must never receive a document');
 });
 
+test('(e2) send-file without fileName uses the file basename — a nameless document is unopenable at the receiver', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = '5555555555@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid, name: 'Docs', canPost: true }] });
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const path2 = await import('node:path');
+  const filePath = path2.join(home, 'quarterly-report.pdf');
+  fs.writeFileSync(filePath, 'pdf-bytes');
+
+  // No fileName at all → the basename (with its extension) travels, never a bare "document".
+  await handleSendCommand({ ts: Date.now(), type: 'send-file', jid, path: filePath, nonce: 'g1' }, loadConfig());
+  let sent = createdSockets.at(-1).__sent.at(-1);
+  assert.equal(sent.content.fileName, 'quarterly-report.pdf');
+  assert.equal(sent.content.mimetype, 'application/pdf');
+
+  // Lowercase `filename` (the natural JSON spelling) is honoured as an alias.
+  await handleSendCommand({ ts: Date.now(), type: 'send-file', jid, path: filePath, filename: 'renamed.pdf', nonce: 'g2' }, loadConfig());
+  sent = createdSockets.at(-1).__sent.at(-1);
+  assert.equal(sent.content.fileName, 'renamed.pdf');
+});
+
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
   const home = useTempHome();
   process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
