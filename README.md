@@ -178,6 +178,18 @@ leaves either the fully-old file or the fully-new one, never a half-written one.
 session lock held by a process that's no longer alive is detected and taken over
 automatically; a lock held by a live process is refused rather than raced.
 
+## Verified sends
+
+Every `send`/`send-file` ack is **echo-verified**: WhatsApp reflects each sent
+message back to the daemon, and that echo is exactly what recipients receive. The
+ack therefore reports what *arrived*, not what was attempted — `verified:
+{fileName, mimetype, bytes}` for documents (the echo must carry a file name, a real
+mimetype and the exact byte count, else `ok:false` with the reason) and `verified:
+{text:true}` for text. If no echo arrives within the timeout (default 15 s,
+`echoTimeoutMs` per command) the ack stays `ok:true` with `verified:null` and a
+`warning: echo-timeout` — a slow echo never fails a real send, but an unverified
+delivery is always visible as such.
+
 ## Receiving documents
 
 Incoming **document attachments** from allowlisted chats are downloaded to

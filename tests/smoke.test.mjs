@@ -153,6 +153,39 @@ test('(e2) send-file without fileName uses the file basename — a nameless docu
   assert.equal(sent.content.fileName, 'renamed.pdf');
 });
 
+test('(e3) a document that echoes NAMELESS gets ok:false — the ack reports what arrived, not what was attempted', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = '5555555555@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid, name: 'Docs', canPost: true }] });
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const path2 = await import('node:path');
+  const filePath = path2.join(home, 'brief.pdf');
+  fs.writeFileSync(filePath, 'pdf-bytes');
+
+  createdSockets.at(-1).__echoMode = 'nameless';
+  await handleSendCommand({ ts: Date.now(), type: 'send-file', jid, path: filePath, fileName: 'brief.pdf', nonce: 'h1', echoTimeoutMs: 2000 }, loadConfig());
+  let acks = fs.readFileSync(path2.join(home, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'send-ack');
+  assert.equal(acks.at(-1).ok, false, 'a nameless echo must fail the ack');
+  assert.match(acks.at(-1).error, /no fileName/);
+
+  createdSockets.at(-1).__echoMode = 'faithful';
+  await handleSendCommand({ ts: Date.now(), type: 'send-file', jid, path: filePath, fileName: 'brief.pdf', nonce: 'h2', echoTimeoutMs: 2000 }, loadConfig());
+  acks = fs.readFileSync(path2.join(home, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'send-ack');
+  assert.equal(acks.at(-1).ok, true);
+  assert.deepEqual(acks.at(-1).verified, { fileName: 'brief.pdf', mimetype: 'application/pdf', bytes: 9 });
+
+  createdSockets.at(-1).__echoMode = 'silent';
+  await handleSendCommand({ ts: Date.now(), type: 'send-file', jid, path: filePath, fileName: 'brief.pdf', nonce: 'h3', echoTimeoutMs: 300 }, loadConfig());
+  acks = fs.readFileSync(path2.join(home, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'send-ack');
+  assert.equal(acks.at(-1).ok, true, 'a slow/absent echo must not fail a real send');
+  assert.equal(acks.at(-1).verified, null);
+  assert.match(acks.at(-1).warning, /echo-timeout/);
+});
+
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
   const home = useTempHome();
   process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;

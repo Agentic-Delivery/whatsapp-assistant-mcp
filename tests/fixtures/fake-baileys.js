@@ -22,6 +22,18 @@ export default function makeWASocket(_config) {
     sendMessage: async (jid, content) => {
       const msgId = `fake-msg-${sent.length + 1}`;
       sent.push({ jid, content, msgId });
+      // Mirror WhatsApp: every send is reflected back as a fromMe upsert. __echoMode
+      // lets a test model a faithful echo, a NAMELESS document echo (the defect
+      // class), or no echo at all.
+      const mode = sock.__echoMode || 'faithful';
+      if (mode !== 'silent') {
+        const message = content.document
+          ? { documentMessage: mode === 'nameless'
+              ? { fileLength: content.document.length }
+              : { fileName: content.fileName, mimetype: content.mimetype, fileLength: content.document.length, caption: content.caption } }
+          : { conversation: content.text };
+        setTimeout(() => ev.emit('messages.upsert', { messages: [{ key: { remoteJid: jid, fromMe: true, id: msgId }, message }] }), 0);
+      }
       return { key: { id: msgId } };
     },
     requestPairingCode: async (_phoneNumber) => '123-456',

@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
-import { connect, appendInbox, sendText, sendDocument, downloadDocument, readNewLines, outboxPath, daemonLogPath, waHome } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, downloadDocument, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -89,11 +89,30 @@ export async function handleSendCommand(cmd, config) {
         // extension. Both key spellings are accepted; the contract is fileName.
         const fileName = cmd.fileName || cmd.filename || path.basename(cmd.path);
         msgId = await sendDocument(jid, cmd.path, fileName, cap);
+        // Verify what ARRIVED, not what we attempted: the echo's documentMessage
+        // must carry a fileName, a real mimetype and our exact byte count.
+        const echo = await awaitEcho(msgId, cmd.echoTimeoutMs ?? 15000);
+        if (echo) {
+          const d = echo.message?.documentMessage || {};
+          const localBytes = fs2.statSync(cmd.path).size;
+          const problems = [];
+          if (!d.fileName) problems.push('no fileName');
+          if (!d.mimetype || d.mimetype === 'application/octet-stream') problems.push(`mimetype ${d.mimetype || 'missing'}`);
+          if (d.fileLength != null && Number(d.fileLength) !== localBytes) problems.push(`size ${d.fileLength} != ${localBytes}`);
+          if (problems.length) throw new Error(`document echoed malformed (${problems.join(', ')}) — recipients cannot open it; msgId ${msgId}`);
+          ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: { fileName: d.fileName, mimetype: d.mimetype, bytes: Number(d.fileLength ?? localBytes) } };
+        } else {
+          ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: null, warning: 'echo-timeout: delivery unverified' };
+        }
       } else {
         const signed = text.startsWith(SIG) ? text : SIG + text;
         msgId = await sendText(jid, signed);
+        const echo = await awaitEcho(msgId, cmd.echoTimeoutMs ?? 15000);
+        const echoed = echo?.message?.conversation ?? echo?.message?.extendedTextMessage?.text ?? null;
+        ack = echo
+          ? { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: { text: echoed === signed } }
+          : { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: null, warning: 'echo-timeout: delivery unverified' };
       }
-      ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId };
     } catch (err) {
       ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: false, error: String(err?.message || err) };
     }

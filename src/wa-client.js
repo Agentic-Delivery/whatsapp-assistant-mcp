@@ -237,6 +237,20 @@ function extractText(message) {
 }
 
 let sockRef = null;
+
+// Echo verification: WhatsApp reflects every message we send back to us as a
+// fromMe upsert. That echo is what recipients actually receive — a document
+// that echoes without fileName/mimetype arrives unopenable even when our bytes
+// were perfect. Senders await the echo (bounded) so the ack can state what
+// arrived, not just what was attempted.
+const pendingEchoes = new Map();
+export function awaitEcho(msgId, timeoutMs = 15000) {
+  if (!msgId) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { pendingEchoes.delete(msgId); resolve(null); }, timeoutMs);
+    pendingEchoes.set(msgId, (raw) => { clearTimeout(t); pendingEchoes.delete(msgId); resolve(raw); });
+  });
+}
 const chatCache = new Map();
 
 function upsertChat(chat) {
@@ -434,6 +448,7 @@ export async function connect(opts = {}) {
 
       sock.ev.on('messages.upsert', (payload) => {
         for (const { record, raw } of extractMessageRecords(payload)) {
+          if (raw?.key?.fromMe && pendingEchoes.has(raw.key.id)) pendingEchoes.get(raw.key.id)(raw);
           try {
             onMessage(record, raw);
           } catch {
