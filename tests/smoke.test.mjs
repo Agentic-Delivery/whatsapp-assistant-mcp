@@ -233,6 +233,27 @@ test('(e5) a command appended between connection-open and the watcher start is s
   assert.equal(acks[0].ok, true);
 });
 
+test('(e6) send_chat_message resolves with the daemon\'s echo verification — the caller sees what arrived', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = '8888888888@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid, name: 'Verified', canPost: true }] });
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+
+  const pending = sendChatMessage({ jid, text: 'hello' }); // MCP side: writes outbox, waits for the ack
+  const outbox = path.join(home, 'outbox.jsonl');
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && !(fs.existsSync(outbox) && fs.readFileSync(outbox, 'utf8').trim())) await new Promise((r) => setTimeout(r, 50));
+  const cmd = JSON.parse(fs.readFileSync(outbox, 'utf8').trim().split('\n').at(-1));
+  await handleSendCommand({ ...cmd, echoTimeoutMs: 2000 }, loadConfig()); // daemon side: sends, awaits echo, acks
+
+  const result = await pending;
+  assert.equal(result.sent, true);
+  assert.deepEqual(result.verified, { text: true }, 'the tool result carries the echo verification, never hides what arrived');
+});
+
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
   const home = useTempHome();
   process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
