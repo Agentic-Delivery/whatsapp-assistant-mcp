@@ -33,10 +33,25 @@ function logDaemon(record) {
  * handler returns a promise tests can await (the loop ignores it; all failure
  * paths resolve into inbox records, never throws).
  */
+// Knock log: a chat that is NOT allowlisted is never stored — but WHO knocked is
+// the bootstrap surface for extending the allowlist from evidence (the group
+// catalog does this for groups; DMs had nothing). Records jid + display name +
+// time ONLY, never text or media. One line per jid per daemon run.
+const knocked = new Set();
+export function recordKnock(record) {
+  const jid = record?.chatJid;
+  if (!jid || knocked.has(jid)) return;
+  knocked.add(jid);
+  fs2.appendFileSync(
+    path.join(waHome(), 'knocks.jsonl'),
+    JSON.stringify({ ts: Date.now(), chatJid: jid, senderName: record.senderName || null }) + '\n',
+  );
+}
+
 export function makeOnMessage(allowlist, onSkipped = () => {}) {
   return (record, raw) => {
     if (!allowlist.has(record.chatJid)) {
-      onSkipped();
+      onSkipped(record);
       return Promise.resolve();
     }
     appendInbox(record);
@@ -204,7 +219,7 @@ async function main() {
   try {
     connection = await connect({
       reconnect: true,
-      onMessage: makeOnMessage(allowlist, () => { skippedCount += 1; }),
+      onMessage: makeOnMessage(allowlist, (record) => { skippedCount += 1; recordKnock(record); }),
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });

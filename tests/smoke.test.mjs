@@ -186,6 +186,26 @@ test('(e3) a document that echoes NAMELESS gets ok:false — the ack reports wha
   assert.match(acks.at(-1).warning, /echo-timeout/);
 });
 
+test('(e4) a non-allowlisted sender is logged as a KNOCK (jid + name only, never text) so the allowlist can grow from evidence', async () => {
+  const home = useTempHome();
+  const { makeOnMessage, recordKnock } = await import('../src/daemon.js');
+  const seen = [];
+  const handler = makeOnMessage(new Set(['g1@g.us']), (r) => { seen.push(r); recordKnock(r); });
+  const secret = 'the private text must never be stored';
+  await handler({ chatJid: '46700000000@s.whatsapp.net', senderName: 'Knocker', text: secret, fromMe: false }, null);
+  await handler({ chatJid: '46700000000@s.whatsapp.net', senderName: 'Knocker', text: 'again', fromMe: false }, null);
+  await handler({ chatJid: 'g1@g.us', senderName: 'Member', text: 'allowed', fromMe: false }, null);
+  assert.equal(seen.length, 2, 'only the non-allowlisted messages are skipped');
+  const path2 = await import('node:path');
+  const knocks = fs.readFileSync(path2.join(home, 'knocks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(knocks.length, 1, 'one knock line per jid per run');
+  assert.equal(knocks[0].chatJid, '46700000000@s.whatsapp.net');
+  assert.equal(knocks[0].senderName, 'Knocker');
+  assert.equal(knocks[0].text, undefined, 'a knock carries no text');
+  assert.ok(!fs.readFileSync(path2.join(home, 'knocks.jsonl'), 'utf8').includes(secret), 'private text never reaches disk');
+  assert.ok(!fs.existsSync(path2.join(home, 'inbox.jsonl')) || !fs.readFileSync(path2.join(home, 'inbox.jsonl'), 'utf8').includes(secret));
+});
+
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
   const home = useTempHome();
   process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
