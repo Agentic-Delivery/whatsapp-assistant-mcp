@@ -125,7 +125,9 @@ export async function sendChatMessage({ jid, text }) {
   if (!ack.ok) {
     throw new Error(`Send failed: ${ack.error || 'unknown error'}`);
   }
-  return { sent: true, msgId: ack.msgId };
+  // Surface what ARRIVED, not just that the attempt was acked: the daemon's
+  // echo verification (or its absence) travels with the tool result.
+  return { sent: true, msgId: ack.msgId, verified: ack.verified ?? null, ...(ack.warning ? { warning: ack.warning } : {}) };
 }
 
 /**
