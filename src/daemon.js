@@ -42,7 +42,7 @@ export function recordKnock(record) {
   const jid = record?.chatJid;
   if (!jid || knocked.has(jid)) return;
   knocked.add(jid);
-  fs2.appendFileSync(
+  fs.appendFileSync(
     path.join(waHome(), 'knocks.jsonl'),
     JSON.stringify({ ts: Date.now(), chatJid: jid, senderName: record.senderName || null }) + '\n',
   );
