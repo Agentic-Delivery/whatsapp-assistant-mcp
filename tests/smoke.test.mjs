@@ -206,6 +206,33 @@ test('(e4) a non-allowlisted sender is logged as a KNOCK (jid + name only, never
   assert.ok(!fs.existsSync(path2.join(home, 'inbox.jsonl')) || !fs.readFileSync(path2.join(home, 'inbox.jsonl'), 'utf8').includes(secret));
 });
 
+test('(e5) a command appended between connection-open and the watcher start is still sent — the offset is snapshotted at process start', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = '7777777777@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid, name: 'Race', canPost: true }] });
+  const { snapshotOutboxOffset, startOutboxWatcher } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  const path2 = await import('node:path');
+  const outbox = path2.join(home, 'outbox.jsonl');
+
+  const startOffset = snapshotOutboxOffset();            // process start
+  await connect({ reconnect: false, onMessage: () => {} }); // connection opens ...
+  fs.appendFileSync(outbox, JSON.stringify({ type: 'send', jid, nonce: 'race-1', text: 'in the window', echoTimeoutMs: 500 }) + '\n'); // ... a command lands in the window
+  const stop = startOutboxWatcher(loadConfig(), startOffset); // watcher starts after
+  const deadline = Date.now() + 5000;
+  let acks = [];
+  while (Date.now() < deadline) {
+    const inbox = path2.join(home, 'inbox.jsonl');
+    if (fs.existsSync(inbox)) acks = fs.readFileSync(inbox, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.type === 'send-ack' && r.nonce === 'race-1');
+    if (acks.length) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  stop();
+  assert.equal(acks.length, 1, 'the in-window command must be sent and acked, never silently skipped');
+  assert.equal(acks[0].ok, true);
+});
+
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
   const home = useTempHome();
   process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;

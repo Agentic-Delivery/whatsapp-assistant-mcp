@@ -142,12 +142,25 @@ export async function handleSendCommand(cmd, config) {
  * appended AFTER the daemon started -- never replays history on restart, which
  * would resend old messages.
  */
-function startOutboxWatcher(config) {
+/**
+ * The outbox offset is snapshotted at PROCESS START, before the WhatsApp
+ * connection opens. Snapshotting inside the watcher (which starts after connect)
+ * silently swallowed any command appended between "connection open" and the
+ * watcher's first read — a send that was never attempted and never acked.
+ */
+export function snapshotOutboxOffset() {
+  const outbox = outboxPath();
+  fs.mkdirSync(path.dirname(outbox), { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(outbox)) fs.writeFileSync(outbox, '', { mode: 0o600 });
+  return fs.statSync(outbox).size;
+}
+
+export function startOutboxWatcher(config, startOffset) {
   const outbox = outboxPath();
   fs.mkdirSync(path.dirname(outbox), { recursive: true, mode: 0o700 });
   if (!fs.existsSync(outbox)) fs.writeFileSync(outbox, '', { mode: 0o600 });
 
-  let offset = fs.statSync(outbox).size;
+  let offset = startOffset ?? fs.statSync(outbox).size;
   let draining = false;
 
   async function drain() {
@@ -215,6 +228,7 @@ async function main() {
   // control, and "not stored" must mean not stored, not "stored somewhere quieter".
   let skippedCount = 0;
 
+  const outboxStartOffset = snapshotOutboxOffset();
   let connection;
   try {
     connection = await connect({
@@ -247,7 +261,7 @@ async function main() {
   } catch (err) {
     console.error(`Group catalog failed (non-fatal): ${err?.message || err}`);
   }
-  const stopOutboxWatcher = startOutboxWatcher(config);
+  const stopOutboxWatcher = startOutboxWatcher(config, outboxStartOffset);
 
   const heartbeat = setInterval(() => {
     logDaemon({
