@@ -178,6 +178,17 @@ leaves either the fully-old file or the fully-new one, never a half-written one.
 session lock held by a process that's no longer alive is detected and taken over
 automatically; a lock held by a live process is refused rather than raced.
 
+## Receiving documents
+
+Incoming **document attachments** from allowlisted chats are downloaded to
+`~/.whatsapp-assistant/downloads/<timestamp>-<filename>` (filename sanitized —
+it is untrusted remote input — and size-capped at 25 MB). Each download adds a
+`media-saved` line to `inbox.jsonl` carrying `mediaPath`, beside the ordinary
+`[document: name]` message record; oversize or failed downloads add a
+`media-skipped` / `media-error` line instead, so an absent file is always
+explained. The allowlist gates downloads exactly as it gates the inbox:
+messages from non-allowlisted chats are neither stored nor downloaded.
+
 ## Tools
 
 | Tool | What it does |

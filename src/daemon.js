@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
-import { connect, appendInbox, sendText, sendDocument, readNewLines, outboxPath, daemonLogPath, waHome } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, downloadDocument, readNewLines, outboxPath, daemonLogPath, waHome } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -24,6 +24,34 @@ function logDaemon(record) {
   } catch {
     // Best-effort logging; a log write failure must never crash the daemon.
   }
+}
+
+/**
+ * The inbound-message policy, as a unit: allowlist gates BOTH the inbox line and
+ * any attachment download — not stored must mean not stored, media included.
+ * Returns the handler the connection loop calls per (record, raw) pair; the
+ * handler returns a promise tests can await (the loop ignores it; all failure
+ * paths resolve into inbox records, never throws).
+ */
+export function makeOnMessage(allowlist, onSkipped = () => {}) {
+  return (record, raw) => {
+    if (!allowlist.has(record.chatJid)) {
+      onSkipped();
+      return Promise.resolve();
+    }
+    appendInbox(record);
+    if (!raw?.message?.documentMessage) return Promise.resolve();
+    return downloadDocument(raw, path.join(waHome(), 'downloads'))
+      .then((r) => {
+        const note = r.path
+          ? { ...record, type: 'media-saved', mediaPath: r.path, bytes: r.bytes }
+          : { ...record, type: 'media-skipped', reason: r.skipped };
+        appendInbox(note);
+      })
+      .catch((err) => {
+        appendInbox({ ...record, type: 'media-error', error: String(err?.message || err) });
+      });
+  };
 }
 
 /**
@@ -151,13 +179,7 @@ async function main() {
   try {
     connection = await connect({
       reconnect: true,
-      onMessage: (record) => {
-        if (allowlist.has(record.chatJid)) {
-          appendInbox(record);
-        } else {
-          skippedCount += 1;
-        }
-      },
+      onMessage: makeOnMessage(allowlist, () => { skippedCount += 1; }),
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });

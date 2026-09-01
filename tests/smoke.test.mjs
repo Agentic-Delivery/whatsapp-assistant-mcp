@@ -189,3 +189,46 @@ test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_c
   const secondPoll = await pollChats();
   assert.deepEqual(secondPoll, {}, 'a second poll_chats with nothing new must return empty (cursor advanced)');
 });
+
+test('an allowlisted document is downloaded and noted; the record itself still lands', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const { makeOnMessage } = await import('../src/daemon.js');
+  const handler = makeOnMessage(new Set(['g1@g.us']));
+  const record = { ts: 1, chatJid: 'g1@g.us', senderName: 'J', fromMe: false, text: '[document: pricing.html]', msgId: 'm1' };
+  const raw = { key: { remoteJid: 'g1@g.us', id: 'm1' }, message: { documentMessage: { fileName: 'pricing.html', fileLength: 512 } } };
+  await handler(record, raw);
+  const lines = fs.readFileSync(path.join(home, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const saved = lines.find((l) => l.type === 'media-saved');
+  assert.ok(saved, 'media-saved note missing');
+  assert.ok(saved.mediaPath.includes('downloads'));
+  assert.equal(fs.readFileSync(saved.mediaPath, 'utf8'), 'fake-bytes-of:pricing.html');
+  assert.ok(lines.some((l) => l.msgId === 'm1' && !l.type), 'plain record missing');
+});
+
+test('a NON-allowlisted document downloads NOTHING and stores nothing (blast radius)', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const { makeOnMessage } = await import('../src/daemon.js');
+  let skipped = 0;
+  const handler = makeOnMessage(new Set(['allowed@g.us']), () => { skipped += 1; });
+  const raw = { key: { remoteJid: 'stranger@g.us', id: 'm2' }, message: { documentMessage: { fileName: 'secret.pdf', fileLength: 10 } } };
+  await handler({ ts: 2, chatJid: 'stranger@g.us', text: '[document: secret.pdf]', msgId: 'm2' }, raw);
+  assert.equal(skipped, 1);
+  assert.ok(!fs.existsSync(path.join(home, 'downloads')), 'downloads dir must not exist');
+  assert.ok(!fs.existsSync(path.join(home, 'inbox.jsonl')), 'inbox must not exist');
+});
+
+test('an oversize document is skipped with a note, never written', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const { makeOnMessage } = await import('../src/daemon.js');
+  const handler = makeOnMessage(new Set(['g1@g.us']));
+  const raw = { key: { remoteJid: 'g1@g.us', id: 'm3' }, message: { documentMessage: { fileName: 'huge.bin', fileLength: 999999999 } } };
+  await handler({ ts: 3, chatJid: 'g1@g.us', text: '[document: huge.bin]', msgId: 'm3' }, raw);
+  const lines = fs.readFileSync(path.join(home, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const note = lines.find((l) => l.type === 'media-skipped');
+  assert.ok(note && String(note.reason).startsWith('too-large'), `expected too-large, got ${JSON.stringify(note)}`);
+  const dl = path.join(home, 'downloads');
+  assert.ok(!fs.existsSync(dl) || fs.readdirSync(dl).length === 0, 'nothing may be written for oversize');
+});

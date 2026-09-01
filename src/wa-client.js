@@ -189,6 +189,29 @@ export function readNewLines(filePath, offset) {
   return { entries, newOffset };
 }
 
+/**
+ * Download an incoming document attachment to destDir. Transport only — the CALLER
+ * (the daemon) owns the allowlist decision; this must never be reached for a chat
+ * that is not stored. Size-capped and filename-sanitized: the name is untrusted
+ * remote input. Returns { path, filename, bytes } or { skipped } — never throws
+ * into the connection loop.
+ */
+export async function downloadDocument(rawMsg, destDir, maxBytes = 25 * 1024 * 1024) {
+  const doc = rawMsg?.message?.documentMessage;
+  if (!doc) return { skipped: 'not-a-document' };
+  const declared = Number(doc.fileLength || 0);
+  if (declared > maxBytes) return { skipped: `too-large:${declared}` };
+  const base = path.basename(String(doc.fileName || 'document')).replace(/[^\w.\-]/g, '_').slice(0, 120) || 'document';
+  fs.mkdirSync(destDir, { recursive: true });
+  const dest = path.join(destDir, `${Date.now()}-${base}`);
+  const { downloadMediaMessage } = await loadBaileysModule();
+  const buf = await downloadMediaMessage(rawMsg, 'buffer', {});
+  if (!buf || buf.length === 0) return { skipped: 'empty-download' };
+  if (buf.length > maxBytes) return { skipped: `too-large:${buf.length}` };
+  fs.writeFileSync(dest, buf);
+  return { path: dest, filename: base, bytes: buf.length };
+}
+
 /** Last N inbox.jsonl messages for one chat, oldest first. */
 export function readMessages(jid, limit = 30) {
   return tailJsonLines(inboxPath(), limit, (record) => record.chatJid === jid);
@@ -239,7 +262,7 @@ function extractMessageRecords(payload) {
     const fromMe = !!m.key.fromMe;
     const senderJid = fromMe ? sockRef?.user?.id || chatJid : m.key.participant || chatJid;
     const cached = chatCache.get(chatJid);
-    out.push({
+    const record = {
       ts: Date.now(),
       chatJid,
       chatName: cached?.name || null,
@@ -248,7 +271,11 @@ function extractMessageRecords(payload) {
       fromMe,
       text: extractText(m.message),
       msgId: m.key.id || null,
-    });
+    };
+    // The raw Baileys message rides BESIDE the JSON-clean record (a pair, never a
+    // field): the daemon needs it to download attachments AFTER its allowlist
+    // decision — policy lives there, transport here.
+    out.push({ record, raw: m });
   }
   return out;
 }
@@ -406,9 +433,9 @@ export async function connect(opts = {}) {
       });
 
       sock.ev.on('messages.upsert', (payload) => {
-        for (const record of extractMessageRecords(payload)) {
+        for (const { record, raw } of extractMessageRecords(payload)) {
           try {
-            onMessage(record);
+            onMessage(record, raw);
           } catch {
             // A handler bug must never take down the connection loop.
           }

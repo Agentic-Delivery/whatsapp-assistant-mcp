@@ -46,6 +46,13 @@ export async function useMultiFileAuthState(_folder) {
 
 export const DisconnectReason = { loggedOut: 401 };
 
+// Incoming-attachment download stand-in: returns deterministic bytes so the
+// daemon's allowlist-gated save path can be exercised without a network.
+export async function downloadMediaMessage(rawMsg) {
+  const name = rawMsg?.message?.documentMessage?.fileName || 'doc';
+  return Buffer.from(`fake-bytes-of:${name}`);
+}
+
 // Minimal stand-ins for the atomic auth adapter's needs: a FAKE initAuthCreds
 // yields a REGISTERED identity (the tests exercise post-pairing behaviour;
 // pairing itself is covered by the real pair flow), and BufferJSON/proto are
