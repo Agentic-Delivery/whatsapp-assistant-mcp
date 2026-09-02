@@ -287,6 +287,14 @@ test('(e7) an @-mention of THIS account is flagged mentionedMe — by contextInf
   assert.deepEqual(got.find((r) => r.msgId === 'm3').mentionedJids, ['bob@s.whatsapp.net'], 'the raw mention list is recorded for diagnosis');
 });
 
+test('(e8) documents get a real mimetype by extension — docx and md are not octet-stream blobs at the receiver', async () => {
+  const { mimetypeFor } = await import('../src/wa-client.js');
+  assert.equal(mimetypeFor('Agreement_v0.1.docx'), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  assert.equal(mimetypeFor('notes.MD'), 'text/markdown');
+  assert.equal(mimetypeFor('deck.pdf'), 'application/pdf');
+  assert.equal(mimetypeFor('mystery.bin'), 'application/octet-stream');
+});
+
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
   const home = useTempHome();
   process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;

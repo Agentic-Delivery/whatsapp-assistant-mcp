@@ -370,6 +370,20 @@ export async function sendText(jid, text) {
 
 /** Sends a document from a local file path. Caption is optional. Same one-connection
  *  rule as sendText: only the daemon process may call this. */
+// The recipient's client opens a document by its mimetype; octet-stream shows a
+// generic blob. Map the extensions this assistant actually sends.
+const MIMETYPES = {
+  pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  md: 'text/markdown', txt: 'text/plain', csv: 'text/csv', json: 'application/json', html: 'text/html',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', zip: 'application/zip',
+};
+export function mimetypeFor(fileName) {
+  const ext = String(fileName || '').toLowerCase().split('.').pop();
+  return MIMETYPES[ext] || 'application/octet-stream';
+}
+
 export async function sendDocument(jid, filePath, fileName, caption) {
   if (!sockRef) {
     throw new Error('No active WhatsApp connection. sendDocument() must run inside the daemon process.');
@@ -377,7 +391,7 @@ export async function sendDocument(jid, filePath, fileName, caption) {
   const buffer = fs.readFileSync(filePath);
   const result = await sockRef.sendMessage(jid, {
     document: buffer,
-    mimetype: fileName.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream',
+    mimetype: mimetypeFor(fileName),
     fileName,
     ...(caption ? { caption } : {}),
   });
