@@ -272,9 +272,19 @@ test('(e7) an @-mention of THIS account is flagged mentionedMe — by contextInf
   upsert('m2', '@100000000000002 check', ['999000111@lid']);                  // by LID
   upsert('m3', '@Bob can you?', ['bob@s.whatsapp.net']);                  // someone else
   upsert('m4', 'bot should do x', undefined);                                  // name in text only
+  // m5: the mention lives in a DOCUMENT CAPTION — the caption must surface and the mention must count
+  sock.ev.emit('messages.upsert', { messages: [{
+    key: { remoteJid: jid, fromMe: false, id: 'm5', participant: 'alice@s.whatsapp.net' }, pushName: 'Alice',
+    message: { documentMessage: { fileName: 'contract.docx', caption: '@15550000001 check attachment 2', contextInfo: { mentionedJid: ['fake-self@s.whatsapp.net'] } } },
+  }] });
+  // m6: protocol-only (key rotation) must not become a record at all
+  sock.ev.emit('messages.upsert', { messages: [{ key: { remoteJid: jid, fromMe: false, id: 'm6', participant: 'alice@s.whatsapp.net' }, message: { senderKeyDistributionMessage: {} } }] });
   await new Promise((r) => setTimeout(r, 50));
   const by = Object.fromEntries(got.map((r) => [r.msgId, r.mentionedMe]));
-  assert.deepEqual(by, { m1: true, m2: true, m3: false, m4: false });
+  assert.deepEqual(by, { m1: true, m2: true, m3: false, m4: false, m5: true });
+  const m5 = got.find((r) => r.msgId === 'm5');
+  assert.equal(m5.text, '[document: contract.docx] @15550000001 check attachment 2', 'caption text surfaces beside the document label');
+  assert.deepEqual(got.find((r) => r.msgId === 'm3').mentionedJids, ['bob@s.whatsapp.net'], 'the raw mention list is recorded for diagnosis');
 });
 
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {

@@ -225,7 +225,11 @@ function extractText(message) {
   if (message.videoMessage) return message.videoMessage.caption ? message.videoMessage.caption : '[video]';
   if (message.documentMessage) {
     const name = message.documentMessage.fileName;
-    return name ? `[document: ${name}]` : '[document]';
+    const label = name ? `[document: ${name}]` : '[document]';
+    // A caption is real text a person wrote — an @-mention or an instruction
+    // written as a document caption must never be hidden behind the label.
+    const cap = message.documentMessage.caption;
+    return cap ? `${label} ${cap}` : label;
   }
   if (message.audioMessage) return message.audioMessage.ptt ? '[voice note]' : '[audio]';
   if (message.stickerMessage) return '[sticker]';
@@ -278,20 +282,34 @@ function bareJid(jid) {
  * depending on the sender's account — so both of our identities are matched,
  * never the rendered "@number" text (which differs under LID addressing).
  */
-function mentionsMe(message) {
-  const selves = [sockRef?.user?.id, sockRef?.user?.lid].map(bareJid).filter(Boolean);
-  if (selves.length === 0) return false;
+export function selfIdentities() {
+  return [sockRef?.user?.id, sockRef?.user?.lid].map(bareJid).filter(Boolean);
+}
+
+/** Every jid the message @-mentions (device suffix stripped), across all sub-messages. */
+function mentionedJids(message) {
+  const out = [];
   for (const sub of Object.values(message || {})) {
     const mentioned = sub?.contextInfo?.mentionedJid;
-    if (Array.isArray(mentioned) && mentioned.some((j) => selves.includes(bareJid(j)))) return true;
+    if (Array.isArray(mentioned)) for (const j of mentioned) { const b = bareJid(j); if (b && !out.includes(b)) out.push(b); }
   }
-  return false;
+  return out;
 }
+
+function mentionsMe(message) {
+  const selves = selfIdentities();
+  return selves.length > 0 && mentionedJids(message).some((j) => selves.includes(j));
+}
+
+// Sub-message keys that carry no human content on their own (key rotation,
+// device metadata). A message made only of these is protocol, not a record.
+const PROTOCOL_ONLY_KEYS = new Set(['senderKeyDistributionMessage', 'messageContextInfo', 'protocolMessage']);
 
 function extractMessageRecords(payload) {
   const out = [];
   for (const m of payload?.messages || []) {
     if (!m.message || !m.key) continue; // e.g. protocol-only entries (reactions, receipts)
+    if (Object.keys(m.message).every((k) => PROTOCOL_ONLY_KEYS.has(k))) continue; // key rotation etc.
     const chatJid = m.key.remoteJid;
     if (!chatJid) continue;
     const fromMe = !!m.key.fromMe;
@@ -307,6 +325,7 @@ function extractMessageRecords(payload) {
       text: extractText(m.message),
       msgId: m.key.id || null,
       mentionedMe: !fromMe && mentionsMe(m.message),
+      mentionedJids: mentionedJids(m.message),
     };
     // The raw Baileys message rides BESIDE the JSON-clean record (a pair, never a
     // field): the daemon needs it to download attachments AFTER its allowlist

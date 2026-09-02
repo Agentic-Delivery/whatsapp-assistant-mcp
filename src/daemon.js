@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
-import { connect, appendInbox, sendText, sendDocument, downloadDocument, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, downloadDocument, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -237,6 +237,9 @@ async function main() {
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });
+          // The identities a mention must match — logged so a missed @-mention is
+          // diagnosable from the log (is the LID identity populated live?).
+          if (update.connection === 'open') logDaemon({ ts: Date.now(), type: 'identity', selves: selfIdentities() });
         }
       },
       onLoggedOut: handleLoggedOut,
