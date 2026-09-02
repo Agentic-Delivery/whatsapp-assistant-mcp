@@ -254,6 +254,29 @@ test('(e6) send_chat_message resolves with the daemon\'s echo verification — t
   assert.deepEqual(result.verified, { text: true }, 'the tool result carries the echo verification, never hides what arrived');
 });
 
+test('(e7) an @-mention of THIS account is flagged mentionedMe — by contextInfo jid or LID, never by rendered text', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = 'grp-mention@g.us';
+  writeConfig(home, { chats: [{ jid, name: 'Mentions', canPost: true }] });
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  const got = [];
+  await connect({ reconnect: false, onMessage: (r) => { got.push(r); } });
+  const sock = createdSockets.at(-1);
+  sock.user.lid = '999000111:5@lid'; // this account's LID identity, device-suffixed like the real one
+  const upsert = (id, text, mentionedJid) => sock.ev.emit('messages.upsert', { messages: [{
+    key: { remoteJid: jid, fromMe: false, id, participant: 'alice@s.whatsapp.net' }, pushName: 'Alice',
+    message: { extendedTextMessage: { text, contextInfo: mentionedJid ? { mentionedJid } : undefined } },
+  }] });
+  upsert('m1', '@15550000001 can you check?', ['fake-self@s.whatsapp.net']);   // by phone jid
+  upsert('m2', '@100000000000002 check', ['999000111@lid']);                  // by LID
+  upsert('m3', '@Bob can you?', ['bob@s.whatsapp.net']);                  // someone else
+  upsert('m4', 'bot should do x', undefined);                                  // name in text only
+  await new Promise((r) => setTimeout(r, 50));
+  const by = Object.fromEntries(got.map((r) => [r.msgId, r.mentionedMe]));
+  assert.deepEqual(by, { m1: true, m2: true, m3: false, m4: false });
+});
+
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
   const home = useTempHome();
   process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;

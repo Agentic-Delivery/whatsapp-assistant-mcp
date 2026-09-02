@@ -267,6 +267,27 @@ function upsertContactName(contact) {
   chatCache.set(contact.id, { jid: contact.id, name });
 }
 
+/** A jid without its device suffix (`46…:1@s.whatsapp.net` → `46…@s.whatsapp.net`). */
+function bareJid(jid) {
+  return typeof jid === 'string' ? jid.replace(/:\d+@/, '@') : null;
+}
+
+/**
+ * True when the message @-mentions THIS account. WhatsApp puts mentions in the
+ * sub-message's contextInfo.mentionedJid, addressed by phone jid OR by LID
+ * depending on the sender's account — so both of our identities are matched,
+ * never the rendered "@number" text (which differs under LID addressing).
+ */
+function mentionsMe(message) {
+  const selves = [sockRef?.user?.id, sockRef?.user?.lid].map(bareJid).filter(Boolean);
+  if (selves.length === 0) return false;
+  for (const sub of Object.values(message || {})) {
+    const mentioned = sub?.contextInfo?.mentionedJid;
+    if (Array.isArray(mentioned) && mentioned.some((j) => selves.includes(bareJid(j)))) return true;
+  }
+  return false;
+}
+
 function extractMessageRecords(payload) {
   const out = [];
   for (const m of payload?.messages || []) {
@@ -285,6 +306,7 @@ function extractMessageRecords(payload) {
       fromMe,
       text: extractText(m.message),
       msgId: m.key.id || null,
+      mentionedMe: !fromMe && mentionsMe(m.message),
     };
     // The raw Baileys message rides BESIDE the JSON-clean record (a pair, never a
     // field): the daemon needs it to download attachments AFTER its allowlist
