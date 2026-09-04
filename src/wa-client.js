@@ -196,12 +196,29 @@ export function readNewLines(filePath, offset) {
  * remote input. Returns { path, filename, bytes } or { skipped } — never throws
  * into the connection loop.
  */
+const IMAGE_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+
+/** The media part of a raw message we save: documents and images (not video/audio/stickers). */
+export function mediaPart(rawMsg) {
+  const m = rawMsg?.message;
+  if (m?.documentMessage) return { kind: 'document', part: m.documentMessage };
+  if (m?.imageMessage) return { kind: 'image', part: m.imageMessage };
+  return null;
+}
+
 export async function downloadDocument(rawMsg, destDir, maxBytes = 25 * 1024 * 1024) {
-  const doc = rawMsg?.message?.documentMessage;
-  if (!doc) return { skipped: 'not-a-document' };
-  const declared = Number(doc.fileLength || 0);
+  const mp = mediaPart(rawMsg);
+  if (!mp) return { skipped: 'not-a-document' };
+  const { kind, part } = mp;
+  const declared = Number(part.fileLength || 0);
   if (declared > maxBytes) return { skipped: `too-large:${declared}` };
-  const base = path.basename(String(doc.fileName || 'document')).replace(/[^\w.\-]/g, '_').slice(0, 120) || 'document';
+  let base;
+  if (kind === 'document') {
+    base = path.basename(String(part.fileName || 'document')).replace(/[^\w.\-]/g, '_').slice(0, 120) || 'document';
+  } else {
+    const ext = IMAGE_EXT[String(part.mimetype || '').toLowerCase()] || 'bin';
+    base = `image.${ext}`;
+  }
   fs.mkdirSync(destDir, { recursive: true });
   const dest = path.join(destDir, `${Date.now()}-${base}`);
   const { downloadMediaMessage } = await loadBaileysModule();
@@ -209,7 +226,7 @@ export async function downloadDocument(rawMsg, destDir, maxBytes = 25 * 1024 * 1
   if (!buf || buf.length === 0) return { skipped: 'empty-download' };
   if (buf.length > maxBytes) return { skipped: `too-large:${buf.length}` };
   fs.writeFileSync(dest, buf);
-  return { path: dest, filename: base, bytes: buf.length };
+  return { path: dest, filename: base, bytes: buf.length, kind, mimetype: part.mimetype || null };
 }
 
 /** Last N inbox.jsonl messages for one chat, oldest first. */

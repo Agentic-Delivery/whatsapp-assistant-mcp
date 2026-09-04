@@ -399,3 +399,18 @@ test('an oversize document is skipped with a note, never written', async () => {
   const dl = path.join(home, 'downloads');
   assert.ok(!fs.existsSync(dl) || fs.readdirSync(dl).length === 0, 'nothing may be written for oversize');
 });
+
+test('an allowlisted IMAGE is downloaded and noted with a typed filename (images are not documents)', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const { makeOnMessage } = await import('../src/daemon.js');
+  const handler = makeOnMessage(new Set(['g1@g.us']));
+  const record = { ts: 1, chatJid: 'g1@g.us', senderName: 'B', fromMe: false, text: '[image]', msgId: 'img1' };
+  const raw = { key: { remoteJid: 'g1@g.us', id: 'img1' }, message: { imageMessage: { mimetype: 'image/jpeg', fileLength: 900, caption: 'decision' } } };
+  await handler(record, raw);
+  const lines = fs.readFileSync(path.join(home, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const saved = lines.find((l) => l.type === 'media-saved' && l.msgId === 'img1');
+  assert.ok(saved, 'media-saved note missing for image');
+  assert.ok(saved.mediaPath.endsWith('.jpg'), `expected .jpg, got ${saved.mediaPath}`);
+  assert.equal(saved.mimetype, 'image/jpeg');
+});

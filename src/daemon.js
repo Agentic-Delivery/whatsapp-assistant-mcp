@@ -55,11 +55,11 @@ export function makeOnMessage(allowlist, onSkipped = () => {}) {
       return Promise.resolve();
     }
     appendInbox(record);
-    if (!raw?.message?.documentMessage) return Promise.resolve();
+    if (!raw?.message?.documentMessage && !raw?.message?.imageMessage) return Promise.resolve();
     return downloadDocument(raw, path.join(waHome(), 'downloads'))
       .then((r) => {
         const note = r.path
-          ? { ...record, type: 'media-saved', mediaPath: r.path, bytes: r.bytes }
+          ? { ...record, type: 'media-saved', mediaPath: r.path, bytes: r.bytes, kind: r.kind, mimetype: r.mimetype }
           : { ...record, type: 'media-skipped', reason: r.skipped };
         appendInbox(note);
       })
