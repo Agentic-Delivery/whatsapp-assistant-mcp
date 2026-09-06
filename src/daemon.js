@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
-import { connect, appendInbox, sendText, sendDocument, downloadDocument, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, sendReaction, downloadDocument, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -55,7 +55,7 @@ export function makeOnMessage(allowlist, onSkipped = () => {}) {
       return Promise.resolve();
     }
     appendInbox(record);
-    if (!raw?.message?.documentMessage && !raw?.message?.imageMessage) return Promise.resolve();
+    if (!hasSavableMedia(raw)) return Promise.resolve();
     return downloadDocument(raw, path.join(waHome(), 'downloads'))
       .then((r) => {
         const note = r.path
@@ -93,7 +93,12 @@ export async function handleSendCommand(cmd, config) {
       // Applies to text messages AND document captions alike.
       const SIG = process.env.WA_AGENT_SIG || "\u{1F916} ";
       let msgId;
-      if (cmd.type === 'send-file') {
+      if (cmd.type === 'react') {
+        // {type:'react', jid, nonce, msgId, emoji, fromMe?, participant?} — an empty emoji removes our reaction.
+        if (!cmd.msgId) throw new Error('react needs msgId');
+        msgId = await sendReaction(jid, { id: cmd.msgId, fromMe: !!cmd.fromMe, participant: cmd.participant }, cmd.emoji ?? '');
+        ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, reacted: { target: cmd.msgId, emoji: cmd.emoji ?? '' } };
+      } else if (cmd.type === 'send-file') {
         const fs2 = await import('node:fs');
         if (!cmd.path || !fs2.existsSync(cmd.path)) throw new Error(`file not found: ${cmd.path}`);
         const cap = cmd.caption ? (cmd.caption.startsWith(SIG) ? cmd.caption : SIG + cmd.caption) : undefined;
@@ -170,7 +175,7 @@ export function startOutboxWatcher(config, startOffset) {
       const { entries, newOffset } = readNewLines(outbox, offset);
       offset = newOffset;
       for (const cmd of entries) {
-        if (cmd?.type !== 'send' && cmd?.type !== 'send-file') continue;
+        if (cmd?.type !== 'send' && cmd?.type !== 'send-file' && cmd?.type !== 'react') continue;
         await handleSendCommand(cmd, config);
       }
     } catch (err) {

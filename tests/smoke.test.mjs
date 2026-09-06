@@ -414,3 +414,74 @@ test('an allowlisted IMAGE is downloaded and noted with a typed filename (images
   assert.ok(saved.mediaPath.endsWith('.jpg'), `expected .jpg, got ${saved.mediaPath}`);
   assert.equal(saved.mimetype, 'image/jpeg');
 });
+
+test('19: a document sent with a caption (documentWithCaptionMessage wrapper) is read as a document, not as [messageContextInfo]', async () => {
+  const { extractText, mediaPart } = await import('../src/wa-client.js');
+  const raw = { message: { messageContextInfo: { deviceListMetadata: {} }, documentWithCaptionMessage: { message: { documentMessage: { fileName: 'Third.md', mimetype: 'text/markdown', caption: 'see attachment' } } } } };
+  assert.equal(extractText(raw.message), '[document: Third.md] see attachment');
+  assert.equal(mediaPart(raw)?.kind, 'document');
+  assert.equal(mediaPart(raw)?.part?.fileName, 'Third.md');
+});
+
+test('20: the daemon download gate sees a captioned (wrapped) document as savable media', async () => {
+  const { hasSavableMedia } = await import('../src/wa-client.js');
+  const wrapped = { message: { messageContextInfo: {}, documentWithCaptionMessage: { message: { documentMessage: { fileName: 'x.md', mimetype: 'text/markdown' } } } } };
+  assert.equal(hasSavableMedia(wrapped), true);
+  assert.equal(hasSavableMedia({ message: { conversation: 'hello' } }), false);
+  const daemonSrc = fs.readFileSync(new URL('../src/daemon.js', import.meta.url), 'utf8');
+  assert.ok(!/raw\?\.message\?\.documentMessage/.test(daemonSrc), 'daemon must not inspect message keys directly');
+});
+
+test('21: a quoted reply carries replyToMsgId and replyToText on the record', async () => {
+  const { replyContext } = await import('../src/wa-client.js');
+  const msg = { extendedTextMessage: { text: 'Yes, that works.', contextInfo: { stanzaId: 'ABC123', participant: '100000000000001@lid', quotedMessage: { conversation: 'Does the quoted reply survive?' } } } };
+  const r = replyContext(msg);
+  assert.equal(r.replyToMsgId, 'ABC123');
+  assert.equal(r.replyToText, 'Does the quoted reply survive?');
+  assert.equal(replyContext({ conversation: 'hello' }), null);
+});
+
+test('22: a reaction becomes a record of type reaction with emoji and target, never skipped', async () => {
+  const { extractMessageRecords } = await import('../src/wa-client.js');
+  const payload = { messages: [{ key: { remoteJid: 'g@g.us', id: 'R1', fromMe: false, participant: 'p@lid' }, pushName: 'T', message: { reactionMessage: { text: '👍', key: { remoteJid: 'g@g.us', id: 'TARGET', fromMe: true } } } }] };
+  const out = extractMessageRecords(payload);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].record.type, 'reaction');
+  assert.equal(out[0].record.reaction.emoji, '👍');
+  assert.equal(out[0].record.reaction.targetMsgId, 'TARGET');
+});
+
+test('23: an edited message (protocolMessage.editedMessage) becomes a record carrying the new text and editOfMsgId', async () => {
+  const { extractMessageRecords } = await import('../src/wa-client.js');
+  const payload = { messages: [{ key: { remoteJid: 'g@g.us', id: 'E1', fromMe: false, participant: 'p@lid' }, message: { protocolMessage: { type: 14, key: { id: 'ORIG' }, editedMessage: { conversation: 'ny text' } } } }] };
+  const out = extractMessageRecords(payload);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].record.text, 'ny text');
+  assert.equal(out[0].record.editOfMsgId, 'ORIG');
+});
+
+test('24: an unknown message type records its raw keys so it can be diagnosed', async () => {
+  const { extractMessageRecords } = await import('../src/wa-client.js');
+  const payload = { messages: [{ key: { remoteJid: 'g@g.us', id: 'U1', fromMe: false }, message: { messageContextInfo: {}, someFutureMessage: { foo: 1 } } }] };
+  const out = extractMessageRecords(payload);
+  assert.equal(out[0].record.text, '[someFutureMessage]');
+  assert.deepEqual(out[0].record.rawKeys, ['messageContextInfo', 'someFutureMessage']);
+});
+
+test('25: the outbox drain dispatches react commands, not only send/send-file', async () => {
+  const src = fs.readFileSync(new URL('../src/daemon.js', import.meta.url), 'utf8');
+  const m = src.match(/if \(cmd\?\.type !== 'send'[^\n]*\) continue;/);
+  assert.ok(m, 'dispatch filter line not found');
+  assert.ok(/'react'/.test(m[0]), 'react must be an accepted outbox command type');
+});
+
+test('26: a secretEncryptedMessage records its target message key and inner field names (never the payload)', async () => {
+  const { extractMessageRecords } = await import('../src/wa-client.js');
+  const payload = { messages: [{ key: { remoteJid: 'd@lid', id: 'S1', fromMe: false }, message: { messageContextInfo: { messageSecret: 'x' }, secretEncryptedMessage: { targetMessageKey: { remoteJid: 'd@lid', id: 'ORIG', fromMe: false }, encPayload: 'AAAA', encIv: 'BBBB', secretEncType: 1 } } }] };
+  const out = extractMessageRecords(payload);
+  const r = out[0].record;
+  assert.equal(r.type, 'secret-encrypted');
+  assert.equal(r.targetMsgId, 'ORIG');
+  assert.deepEqual(r.innerKeys, ['targetMessageKey', 'encPayload', 'encIv', 'secretEncType']);
+  assert.ok(!JSON.stringify(r).includes('AAAA'), 'payload must not be stored');
+});

@@ -198,12 +198,36 @@ export function readNewLines(filePath, offset) {
  */
 const IMAGE_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 
+/**
+ * WhatsApp wraps some messages in an envelope whose real content sits one level
+ * down in `.message`: a document sent WITH a caption arrives as
+ * documentWithCaptionMessage, disappearing/view-once messages as
+ * ephemeralMessage / viewOnceMessage*, edits as editedMessage. Without
+ * unwrapping, the first key seen is often messageContextInfo and the record
+ * is stored as "[messageContextInfo]" — a file a founder sent, silently lost.
+ */
+const WRAPPER_KEYS = ['documentWithCaptionMessage', 'ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'editedMessage'];
+export function unwrapMessage(message) {
+  let m = message;
+  for (let i = 0; i < 4 && m; i++) {
+    const k = WRAPPER_KEYS.find((w) => m[w]?.message);
+    if (!k) break;
+    m = m[k].message;
+  }
+  return m;
+}
+
 /** The media part of a raw message we save: documents and images (not video/audio/stickers). */
 export function mediaPart(rawMsg) {
-  const m = rawMsg?.message;
+  const m = unwrapMessage(rawMsg?.message);
   if (m?.documentMessage) return { kind: 'document', part: m.documentMessage };
   if (m?.imageMessage) return { kind: 'image', part: m.imageMessage };
   return null;
+}
+
+/** Single gate for "should this message's media be saved" — the daemon must use this, never inspect message keys itself. */
+export function hasSavableMedia(rawMsg) {
+  return !!mediaPart(rawMsg);
 }
 
 export async function downloadDocument(rawMsg, destDir, maxBytes = 25 * 1024 * 1024) {
@@ -234,7 +258,34 @@ export function readMessages(jid, limit = 30) {
   return tailJsonLines(inboxPath(), limit, (record) => record.chatJid === jid);
 }
 
-function extractText(message) {
+/**
+ * A quoted reply ("reply" in the WhatsApp UI) carries the quoted message inside the
+ * sub-message's contextInfo. Without surfacing it, a one-word answer such as
+ * "ja" cannot be tied to the question it answers.
+ */
+export function replyContext(rawMessage) {
+  const message = unwrapMessage(rawMessage);
+  if (!message) return null;
+  const sub = Object.values(message).find((v) => v && typeof v === 'object' && v.contextInfo?.quotedMessage);
+  const ci = sub?.contextInfo;
+  if (!ci?.quotedMessage) return null;
+  return {
+    replyToMsgId: ci.stanzaId || null,
+    replyToParticipant: ci.participant || null,
+    replyToText: extractText(ci.quotedMessage),
+  };
+}
+
+/** Sends an emoji reaction to a message; empty emoji removes our reaction. Daemon-only. */
+export async function sendReaction(jid, targetKey, emoji) {
+  if (!sockRef) throw new Error('No active WhatsApp connection. sendReaction() must run inside the daemon process.');
+  const key = { remoteJid: jid, id: targetKey.id, fromMe: !!targetKey.fromMe, ...(targetKey.participant ? { participant: targetKey.participant } : {}) };
+  const result = await sockRef.sendMessage(jid, { react: { text: emoji || '', key } });
+  return result?.key?.id || null;
+}
+
+export function extractText(rawMessage) {
+  const message = unwrapMessage(rawMessage);
   if (!message) return '[unknown]';
   if (typeof message.conversation === 'string') return message.conversation;
   if (typeof message.extendedTextMessage?.text === 'string') return message.extendedTextMessage.text;
@@ -253,7 +304,7 @@ function extractText(message) {
   if (message.contactMessage) return '[contact]';
   if (message.locationMessage) return '[location]';
   if (message.reactionMessage) return '[reaction]';
-  const [type] = Object.keys(message);
+  const type = Object.keys(message).find((k) => !PROTOCOL_ONLY_KEYS.has(k)) || Object.keys(message)[0];
   return type ? `[${type}]` : '[unknown]';
 }
 
@@ -304,7 +355,8 @@ export function selfIdentities() {
 }
 
 /** Every jid the message @-mentions (device suffix stripped), across all sub-messages. */
-function mentionedJids(message) {
+function mentionedJids(rawMessage) {
+  const message = unwrapMessage(rawMessage);
   const out = [];
   for (const sub of Object.values(message || {})) {
     const mentioned = sub?.contextInfo?.mentionedJid;
@@ -322,16 +374,20 @@ function mentionsMe(message) {
 // device metadata). A message made only of these is protocol, not a record.
 const PROTOCOL_ONLY_KEYS = new Set(['senderKeyDistributionMessage', 'messageContextInfo', 'protocolMessage']);
 
-function extractMessageRecords(payload) {
+export function extractMessageRecords(payload) {
   const out = [];
   for (const m of payload?.messages || []) {
-    if (!m.message || !m.key) continue; // e.g. protocol-only entries (reactions, receipts)
-    if (Object.keys(m.message).every((k) => PROTOCOL_ONLY_KEYS.has(k))) continue; // key rotation etc.
+    if (!m.message || !m.key) continue; // e.g. receipts
+    // An edit arrives as protocolMessage(type MESSAGE_EDIT) carrying editedMessage —
+    // real human content, so it is never treated as protocol-only.
+    const edited = m.message.protocolMessage?.editedMessage;
+    if (!edited && Object.keys(m.message).every((k) => PROTOCOL_ONLY_KEYS.has(k))) continue; // key rotation etc.
     const chatJid = m.key.remoteJid;
     if (!chatJid) continue;
     const fromMe = !!m.key.fromMe;
     const senderJid = fromMe ? sockRef?.user?.id || chatJid : m.key.participant || chatJid;
     const cached = chatCache.get(chatJid);
+    const body = edited || m.message;
     const record = {
       ts: Date.now(),
       chatJid,
@@ -339,11 +395,36 @@ function extractMessageRecords(payload) {
       senderJid,
       senderName: m.pushName || cached?.name || null,
       fromMe,
-      text: extractText(m.message),
+      text: extractText(body),
       msgId: m.key.id || null,
-      mentionedMe: !fromMe && mentionsMe(m.message),
-      mentionedJids: mentionedJids(m.message),
+      mentionedMe: !fromMe && mentionsMe(body),
+      mentionedJids: mentionedJids(body),
     };
+    if (edited) record.editOfMsgId = m.message.protocolMessage?.key?.id || null;
+    // Reactions are records too: "<sender> reacted 👍 to <msg>" is a real signal.
+    const react = unwrapMessage(m.message)?.reactionMessage;
+    if (react) {
+      record.type = 'reaction';
+      record.reaction = { emoji: react.text || '', targetMsgId: react.key?.id || null, targetFromMe: !!react.key?.fromMe, removed: !react.text };
+      record.text = react.text ? `[reaction ${react.text}]` : '[reaction removed]';
+    }
+    const rc = replyContext(body);
+    if (rc) Object.assign(record, rc);
+    // An edit on current WhatsApp arrives as secretEncryptedMessage, encrypted with the
+    // edited message's own secret. This Baileys version cannot decrypt it; we keep the
+    // target key and the field names (never the payload) so the edit can at least be
+    // attributed and the sender asked to resend.
+    const sec = m.message.secretEncryptedMessage;
+    if (sec) {
+      record.type = 'secret-encrypted';
+      record.targetMsgId = sec.targetMessageKey?.id || null;
+      record.innerKeys = Object.keys(sec);
+      record.text = record.targetMsgId ? `[edit of ${record.targetMsgId} - encrypted, cannot be read]` : '[secretEncryptedMessage]';
+    }
+    // An unrecognised type keeps its raw key list so the next such message can be diagnosed, not guessed.
+    if (/^\[[A-Za-z]+\]$/.test(record.text) && !record.type && !['[image]','[video]','[document]','[audio]','[voice note]','[sticker]','[contact]','[location]','[unknown]'].includes(record.text)) {
+      record.rawKeys = Object.keys(m.message);
+    }
     // The raw Baileys message rides BESIDE the JSON-clean record (a pair, never a
     // field): the daemon needs it to download attachments AFTER its allowlist
     // decision — policy lives there, transport here.
