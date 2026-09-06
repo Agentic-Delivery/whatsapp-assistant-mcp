@@ -1,41 +1,25 @@
 # Contributing
 
-## Dev setup
+Thanks for helping improve the bridge. A few house rules keep the repo clean and safe to share.
 
-```bash
-git clone https://github.com/Agentic-Delivery/whatsapp-assistant-mcp.git
-cd whatsapp-assistant-mcp
-npm ci
-npm test
-```
+## Ground rules
 
-No build step -- plain JS, ESM, Node 20+.
+- **English only** in code, comments, commit messages and test fixtures.
+- **No real identities anywhere.** Test fixtures use placeholder names (Alice, Bob) and obviously fake
+  numbers such as `100000000000001@lid` or `15550000001`. Never paste a real phone number, LID, group
+  jid, email address or chat excerpt into code, tests, issues or commit messages.
+- **No secrets, no private state.** `auth-info/`, `creds.json`, `config.json`, `inbox.jsonl`, `outbox.jsonl`
+  and `.env` are ignored on purpose. If you find one tracked, that is a bug.
+- **Describe the mechanism, not the incident.** A commit says what the code does now and why that is
+  correct, never who reported it or in which chat.
 
-## Tests never touch a real WhatsApp connection
+## Workflow
 
-`src/wa-client.js` loads `@whiskeysockets/baileys` unless the `WA_CLIENT_FAKE`
-environment variable points at a stand-in module exporting the same shape (default
-export = socket factory, plus `useMultiFileAuthState` and `DisconnectReason` named
-exports). The test suite (`tests/smoke.test.mjs`) sets this to
-`tests/fixtures/fake-baileys.js` before exercising `connect()`, so no test -- existing
-or new -- ever opens a real network connection or touches a real phone's session. Any
-test that needs new connection-level behavior should extend the fake, never skip the
-seam and call Baileys for real.
+1. Add or extend a test in `tests/` for every behaviour change (`npm test` runs the suite).
+2. Keep commits small and focused; the message states the behaviour, not the diary.
+3. Open a pull request. CI must be green.
 
-Every test also points `WA_HOME` at its own temporary directory, never
-`~/.whatsapp-assistant`, so tests can't collide with (or corrupt) a real local session.
+## Reporting a security issue
 
-## Commit style
-
-Small, focused commits. A one-line summary in the imperative mood (`fix: ...`,
-`feat: ...`, `docs: ...`, `test: ...`, `chore: ...`), with a body explaining *why* when
-it isn't obvious from the diff alone.
-
-## Before opening a PR
-
-- `npm test` is green.
-- `node --check <file>` is clean on every JS file you touched.
-- New behavior has a test; bug fixes have a test that fails before the fix and passes
-  after it.
-- No secrets, phone numbers, or real chat/group identifiers in code, tests, fixtures, or
-  commit messages -- see [SECURITY.md](SECURITY.md).
+Do not open a public issue for a vulnerability. Contact the maintainers privately via the profile
+of the repository owner.
