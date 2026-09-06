@@ -271,7 +271,7 @@ test('(e7) an @-mention of THIS account is flagged mentionedMe — by contextInf
   upsert('m1', '@15550000001 can you check?', ['fake-self@s.whatsapp.net']);   // by phone jid
   upsert('m2', '@100000000000002 check', ['999000111@lid']);                  // by LID
   upsert('m3', '@Bob can you?', ['bob@s.whatsapp.net']);                  // someone else
-  upsert('m4', 'bot should do x', undefined);                                  // name in text only
+  upsert('m4', 'bot should do x', undefined);                                     // name in text only
   // m5: the mention lives in a DOCUMENT CAPTION — the caption must surface and the mention must count
   sock.ev.emit('messages.upsert', { messages: [{
     key: { remoteJid: jid, fromMe: false, id: 'm5', participant: 'alice@s.whatsapp.net' }, pushName: 'Alice',
