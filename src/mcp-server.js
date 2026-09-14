@@ -131,6 +131,53 @@ export async function sendChatMessage({ jid, text }) {
 }
 
 /**
+ * react_to_message: puts an emoji reaction on one message in an allowlisted chat
+ * (canPost required, same as sending), handed off to the daemon via outbox.jsonl
+ * and confirmed by its ack. An empty emoji removes this account's reaction.
+ * In a group the target's sender must be given as participant so WhatsApp can
+ * address the right message; fromMe marks a message this account sent itself.
+ */
+export async function reactToMessage({ jid, msgId, emoji, participant, fromMe }) {
+  const config = loadConfig();
+  const chat = findChat(config, jid);
+  if (!chat) {
+    throw new Error(`"${jid}" is not in the allowlist. Add it to ${configPath()} before reacting.`);
+  }
+  if (!chat.canPost) {
+    throw new Error(`"${jid}" (${chat.name}) has canPost:false in ${configPath()}. Set canPost:true to allow reactions.`);
+  }
+  if (typeof msgId !== 'string' || msgId.trim() === '') {
+    throw new Error('msgId must be a non-empty string.');
+  }
+  if (typeof emoji !== 'string') {
+    throw new Error('emoji must be a string (empty string removes the reaction).');
+  }
+
+  const nonce = crypto.randomUUID();
+  appendOutboxCommand({
+    ts: Date.now(),
+    type: 'react',
+    jid,
+    nonce,
+    msgId,
+    emoji,
+    ...(participant ? { participant } : {}),
+    ...(fromMe ? { fromMe: true } : {}),
+  });
+
+  const ack = await waitForAck(nonce, SEND_ACK_TIMEOUT_MS);
+  if (!ack) {
+    throw new Error(
+      `Timed out waiting ${SEND_ACK_TIMEOUT_MS / 1000}s for the daemon to send the reaction. Is 'wa-daemon' running?`,
+    );
+  }
+  if (!ack.ok) {
+    throw new Error(`Reaction failed: ${ack.error || 'unknown error'}`);
+  }
+  return { reacted: true, target: msgId, emoji, ...(ack.warning ? { warning: ack.warning } : {}) };
+}
+
+/**
  * poll_chats: drains inbox.jsonl entries newer than the persisted cursor (advancing
  * it), grouped by chat jid. Protocol bookkeeping lines (send-ack) carry a "type"
  * field and are skipped here -- send_chat_message already resolves those directly.
@@ -231,6 +278,27 @@ export function buildServer() {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     guard(({ jid, text }) => sendChatMessage({ jid, text })),
+  );
+
+  server.registerTool(
+    'react_to_message',
+    {
+      title: 'React to a WhatsApp message with an emoji',
+      description:
+        'Puts one emoji reaction on a message in an allowlisted chat with canPost enabled -- the ' +
+        'lightweight way to acknowledge a message without posting text. Handed off to the daemon ' +
+        'and confirmed by its ack. An empty emoji removes this account\'s reaction. In a group, ' +
+        'pass the target message\'s sender jid as participant.',
+      inputSchema: {
+        jid: z.string().describe('WhatsApp chat jid, must be allowlisted with canPost: true'),
+        msgId: z.string().min(1).describe('Id of the message to react to (from poll_chats or read_chat_messages)'),
+        emoji: z.string().describe('The reaction emoji; empty string removes the reaction'),
+        participant: z.string().optional().describe('Sender jid of the target message (needed in groups)'),
+        fromMe: z.boolean().optional().describe('True if the target message was sent by this account'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    guard(({ jid, msgId, emoji, participant, fromMe }) => reactToMessage({ jid, msgId, emoji, participant, fromMe })),
   );
 
   server.registerTool(

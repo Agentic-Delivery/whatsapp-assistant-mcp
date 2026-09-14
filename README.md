@@ -209,11 +209,38 @@ messages from non-allowlisted chats are neither stored nor downloaded.
 | `read_chat_messages` | Last N stored messages for one allowlisted chat, oldest first -- read from the local inbox log, not a live fetch |
 | `send_chat_message` | Sends a text message via the daemon and waits up to 15s for delivery confirmation; requires `canPost: true` |
 | `poll_chats` | Messages that arrived since the last call, grouped by chat jid; the read position is persisted, so each message is returned exactly once |
+| `react_to_message` | Puts an emoji reaction on one message (or removes it with an empty emoji) via the daemon and waits for its ack; requires `canPost: true` |
 
 Every tool validates the jid against the allowlist before touching anything else. An
 unknown jid is refused with an error naming the config file; sending additionally
 requires `canPost: true`. There is no bulk-send or broadcast tool -- one call sends one
 message to one chat.
+
+## Reactions
+
+A reaction is the cheapest signal both directions, and this bridge treats it as a
+first-class record and command.
+
+**Inbound.** A reaction someone puts on a message arrives in `inbox.jsonl` as a record
+of `type: "reaction"` with `reaction.emoji` and `reaction.targetMsgId`, so an agent can
+see that a message was acknowledged without anyone typing.
+
+**Outbound.** `react_to_message` (or a raw `{"type":"react", "jid", "nonce", "msgId",
+"emoji", "participant?", "fromMe?"}` line in `outbox.jsonl`) makes the daemon put the
+emoji on the target message and ack with `reacted: {target, emoji}`. In a group the
+target's sender jid goes in `participant`; an empty `emoji` removes the reaction.
+
+**A convention that works.** When an agent handles messages from real people, react
+before or instead of replying, and keep the vocabulary tiny so the meaning is stable:
+
+| Emoji | Meaning |
+|---|---|
+| 👀 | Seen, being handled |
+| 👍 | Acknowledged, no action needed |
+| ✅ | Done |
+
+A reaction never replaces an answer that was asked for; it tells the human the message
+did not fall on the floor while the answer is being produced.
 
 ## Troubleshooting
 

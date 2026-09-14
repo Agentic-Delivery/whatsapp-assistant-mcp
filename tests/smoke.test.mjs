@@ -15,7 +15,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig } from '../src/config.js';
-import { pollChats, sendChatMessage } from '../src/mcp-server.js';
+import { pollChats, reactToMessage, sendChatMessage } from '../src/mcp-server.js';
 import { appendInbox, connect, readMessages } from '../src/wa-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -484,4 +484,38 @@ test('26: a secretEncryptedMessage records its target message key and inner fiel
   assert.equal(r.targetMsgId, 'ORIG');
   assert.deepEqual(r.innerKeys, ['targetMessageKey', 'encPayload', 'encIv', 'secretEncType']);
   assert.ok(!JSON.stringify(r).includes('AAAA'), 'payload must not be stored');
+});
+
+test('26: react_to_message on a canPost:false chat is refused without touching outbox', async () => {
+  const home = useTempHome();
+  const jid = '1111111111@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid, name: 'No Post', canPost: false }] });
+
+  await assert.rejects(() => reactToMessage({ jid, msgId: 'M1', emoji: '👍' }), /canPost:false/);
+  assert.equal(fs.existsSync(path.join(home, 'outbox.jsonl')), false, 'outbox.jsonl must not be created for a refused reaction');
+});
+
+test('27: react_to_message writes a react command the daemon dispatches, and resolves with its ack', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = 'grp-react@g.us';
+  writeConfig(home, { chats: [{ jid, name: 'Reactions', canPost: true }] });
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+
+  const pending = reactToMessage({ jid, msgId: 'TARGET', emoji: '✅', participant: 'p@lid' });
+  const outbox = path.join(home, 'outbox.jsonl');
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && !(fs.existsSync(outbox) && fs.readFileSync(outbox, 'utf8').trim())) await new Promise((r) => setTimeout(r, 50));
+  const cmd = JSON.parse(fs.readFileSync(outbox, 'utf8').trim().split('\n').at(-1));
+  assert.equal(cmd.type, 'react');
+  assert.equal(cmd.msgId, 'TARGET');
+  assert.equal(cmd.participant, 'p@lid');
+  await handleSendCommand(cmd, loadConfig());
+
+  const result = await pending;
+  assert.equal(result.reacted, true);
+  assert.equal(result.emoji, '✅');
+  assert.equal(result.target, 'TARGET');
 });
