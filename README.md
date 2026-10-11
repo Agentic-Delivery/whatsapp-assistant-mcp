@@ -225,12 +225,14 @@ belonged to one of this account's messages; an id that was not ours is a no-op.
 
 ## Receiving files
 
-Incoming **documents, images and videos** from allowlisted chats are downloaded to
-`~/.whatsapp-assistant/downloads/<timestamp>-<filename>` (a document keeps its
-sanitized name -- it is untrusted remote input -- while images and videos are named
-by type, such as `image.png` or `video.mp4`). Size caps: 25 MB for documents and
-images, 200 MB for videos. Each download adds a
-`media-saved` line to `inbox.jsonl` carrying `mediaPath`, beside the ordinary
+Incoming **documents, images, videos, audio files and voice notes** from allowlisted
+chats are downloaded to `~/.whatsapp-assistant/downloads/<timestamp>-<filename>` (a
+document keeps its sanitized name -- it is untrusted remote input -- while other media
+is named by type, such as `image.png`, `video.mp4`, `audio.mp3`, or `voice-note.ogg`
+for a voice note). Size caps: 200 MB for videos, 25 MB for everything else. A saved
+voice note lets an agent transcribe what was said (for example with a local Whisper
+model) and treat it like a typed message; transcription is not part of this bridge.
+Each download adds a `media-saved` line to `inbox.jsonl` carrying `mediaPath`, beside the ordinary
 `[document: name]` message record; oversize or failed downloads add a
 `media-skipped` / `media-error` line instead, so an absent file is always
 explained. The allowlist gates downloads exactly as it gates the inbox:

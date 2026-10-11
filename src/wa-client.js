@@ -198,6 +198,12 @@ export function readNewLines(filePath, offset) {
  */
 const IMAGE_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const VIDEO_EXT = { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm', 'video/3gpp': '3gp' };
+const AUDIO_EXT = { 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/aac': 'aac', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/amr': 'amr', 'audio/webm': 'webm' };
+const EXT_BY_KIND = { image: IMAGE_EXT, video: VIDEO_EXT, audio: AUDIO_EXT };
+/** "audio/ogg; codecs=opus" -> "audio/ogg": WhatsApp mimetypes may carry parameters. */
+function baseMimetype(mt) {
+  return String(mt || '').split(';')[0].trim().toLowerCase();
+}
 
 /**
  * WhatsApp wraps some messages in an envelope whose real content sits one level
@@ -224,14 +230,18 @@ export function mediaPart(rawMsg) {
   if (m?.documentMessage) return { kind: 'document', part: m.documentMessage };
   if (m?.imageMessage) return { kind: 'image', part: m.imageMessage };
   if (m?.videoMessage) return { kind: 'video', part: m.videoMessage };
+  // Voice notes (ptt) and audio files: saved so an agent can transcribe what was said.
+  if (m?.audioMessage) return { kind: 'audio', part: m.audioMessage };
   return null;
 }
 
-/** Local file name for a saved media part. A document keeps its (sanitized, untrusted) name; images and videos get kind.ext. */
+/** Local file name for a saved media part. A document keeps its (sanitized, untrusted) name; images, videos and
+ *  audio get kind.ext, and a voice note (ptt) is named voice-note.ext. */
 export function mediaFilename(kind, part) {
   if (kind === 'document') return path.basename(String(part.fileName || 'document')).replace(/[^\w.\-]/g, '_').slice(0, 120) || 'document';
-  const map = kind === 'video' ? VIDEO_EXT : IMAGE_EXT;
-  return `${kind}.${map[String(part.mimetype || '').toLowerCase()] || 'bin'}`;
+  const ext = EXT_BY_KIND[kind]?.[baseMimetype(part.mimetype)] || 'bin';
+  const stem = kind === 'audio' && part.ptt ? 'voice-note' : kind;
+  return `${stem}.${ext}`;
 }
 
 /** Single gate for "should this message's media be saved" — the daemon must use this, never inspect message keys itself. */

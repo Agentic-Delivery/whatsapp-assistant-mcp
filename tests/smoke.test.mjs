@@ -419,6 +419,36 @@ test('an allowlisted IMAGE is downloaded and noted with a typed filename (images
   assert.equal(saved.mimetype, 'image/jpeg');
 });
 
+test('an allowlisted VOICE NOTE is downloaded as voice-note.ogg so an agent can transcribe what was said', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const { makeOnMessage } = await import('../src/daemon.js');
+  const handler = makeOnMessage(new Set(['g1@g.us']));
+  const record = { ts: 1, chatJid: 'g1@g.us', senderName: 'B', fromMe: false, text: '[voice note]', msgId: 'vn1' };
+  const raw = { key: { remoteJid: 'g1@g.us', id: 'vn1' }, message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus', fileLength: 4200, ptt: true, seconds: 3 } } };
+  await handler(record, raw);
+  const lines = fs.readFileSync(path.join(home, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const saved = lines.find((l) => l.type === 'media-saved' && l.msgId === 'vn1');
+  assert.ok(saved, 'media-saved note missing for voice note');
+  assert.equal(saved.kind, 'audio');
+  assert.ok(saved.mediaPath.endsWith('-voice-note.ogg'), `expected voice-note.ogg, got ${saved.mediaPath}`);
+  const { mediaFilename } = await import('../src/wa-client.js');
+  assert.equal(mediaFilename('audio', { mimetype: 'audio/mpeg' }), 'audio.mp3', 'a plain audio file keeps its type');
+  assert.equal(mediaFilename('video', { mimetype: 'video/mp4; codecs=avc1' }), 'video.mp4', 'mimetype parameters are ignored');
+});
+
+test('an oversize voice note is skipped by the 25 MB cap, not downloaded', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const { makeOnMessage } = await import('../src/daemon.js');
+  const handler = makeOnMessage(new Set(['g1@g.us']));
+  const raw = { key: { remoteJid: 'g1@g.us', id: 'vn2' }, message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus', fileLength: 26 * 1024 * 1024, ptt: true } } };
+  await handler({ ts: 1, chatJid: 'g1@g.us', text: '[voice note]', msgId: 'vn2' }, raw);
+  const lines = fs.readFileSync(path.join(home, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const note = lines.find((l) => l.type === 'media-skipped' && l.msgId === 'vn2');
+  assert.ok(note && String(note.reason).startsWith('too-large'), `expected too-large, got ${JSON.stringify(note)}`);
+});
+
 test('19: a document sent with a caption (documentWithCaptionMessage wrapper) is read as a document, not as [messageContextInfo]', async () => {
   const { extractText, mediaPart } = await import('../src/wa-client.js');
   const raw = { message: { messageContextInfo: { deviceListMetadata: {} }, documentWithCaptionMessage: { message: { documentMessage: { fileName: 'Third.md', mimetype: 'text/markdown', caption: 'see attachment' } } } } };
