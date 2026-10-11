@@ -280,7 +280,10 @@ Restart the daemon and the MCP server after changing the config.
   command fails, a `transcript-error` record says why. Only real voice notes are transcribed
   (never a document, whatever its name), one at a time, each with a 5-minute limit. A voice
   note still waiting when the daemon stops is not transcribed later; its audio stays saved. Options: `--model` (default `small`;
-  `large-v3-turbo` is more accurate), `--languages en,de` to limit language detection.
+  `large-v3-turbo` is more accurate), `--languages en,de` for the languages you expect: when
+  a short clip's language is unsure it is tried in each of them (slower), and the transcript
+  is prefixed `[uncertain] ` because a very short or unclear clip can come out as a phrase
+  nobody said; a longer clip detected outside the list is transcribed in the first one.
 - **Speak:** `speak_voice_note` writes the text to `{textFile}`, runs the command, and sends
   the Ogg/Opus file it wrote to `{output}` as a voice note; the audio is deleted after sending.
   Options: `--voice` (default `af_heart`) and `--lang` (`a` American English, `b` British

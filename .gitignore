@@ -11,3 +11,6 @@ outbox.jsonl
 wa-mcp.config.json
 cursor.json
 chats-catalog.json
+
+# Python bytecode from tools/ and the test stub
+__pycache__/
