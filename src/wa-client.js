@@ -305,7 +305,7 @@ export async function downloadDocument(rawMsg, destDir, maxBytes) {
   if (!buf || buf.length === 0) return { skipped: 'empty-download' };
   if (buf.length > maxBytes) return { skipped: `too-large:${buf.length}` };
   fs.writeFileSync(dest, buf);
-  return { path: dest, filename: base, bytes: buf.length, kind, mimetype: part.mimetype || null };
+  return { path: dest, filename: base, bytes: buf.length, kind, mimetype: part.mimetype || null, voiceNote: kind === 'audio' && !!part.ptt };
 }
 
 /** Last N inbox.jsonl messages for one chat, oldest first. */

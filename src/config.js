@@ -90,7 +90,7 @@ export function loadConfig() {
     };
   });
 
-  return { chats: normalized, retention: parseRetention(parsed.retention, file) };
+  return { chats: normalized, retention: parseRetention(parsed.retention, file), speech: parseSpeech(parsed.speech, file) };
 }
 
 /**
@@ -113,4 +113,32 @@ function parseRetention(r, file) {
 export function findChat(config, jid) {
   if (!jid) return null;
   return config.chats.find((c) => c.jid === jid) || null;
+}
+
+/**
+ * Optional speech commands (argv arrays, run without a shell):
+ *   "speech": {
+ *     "transcribe": ["python3", "tools/transcribe.py", "{input}"],
+ *     "speak": ["python3", "tools/speak.py", "--text-file", "{textFile}", "--output", "{output}"]
+ *   }
+ * Either may be omitted; without them voice notes are only saved and no voice can be spoken.
+ */
+function parseSpeech(sp, file) {
+  if (sp === undefined || sp === null) return { transcribe: null, speak: null };
+  if (typeof sp !== 'object' || Array.isArray(sp)) throw new Error(`WhatsApp assistant config at ${file}: "speech" must be an object.`);
+  for (const k of Object.keys(sp)) {
+    if (k !== 'transcribe' && k !== 'speak') throw new Error(`WhatsApp assistant config at ${file}: unknown key speech.${k} (only "transcribe" and "speak" are supported).`);
+  }
+  const cmd = (k, needs) => {
+    if (sp[k] === undefined || sp[k] === null) return null;
+    const c = sp[k];
+    if (!Array.isArray(c) || c.length === 0 || !c.every((x) => typeof x === 'string' && x !== '')) {
+      throw new Error(`WhatsApp assistant config at ${file}: speech.${k} must be a non-empty array of strings (program and arguments).`);
+    }
+    for (const n of needs) {
+      if (!c.some((x) => x.includes(`{${n}}`))) throw new Error(`WhatsApp assistant config at ${file}: speech.${k} must contain the {${n}} placeholder.`);
+    }
+    return c;
+  };
+  return { transcribe: cmd('transcribe', ['input']), speak: cmd('speak', ['textFile', 'output']) };
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Stdio MCP server (name: whatsapp-assistant). Exposes eight tools: list_chats,
+// Stdio MCP server (name: whatsapp-assistant). Exposes nine tools: list_chats,
 // read_chat_messages, poll_chats, send_chat_message, send_chat_document,
-// send_chat_image, send_chat_voice_note and react_to_message.
+// send_chat_image, send_chat_voice_note, speak_voice_note and react_to_message.
 //
 // This process NEVER opens its own Baileys connection -- Baileys refuses a second
 // simultaneous connection against the same auth session, and the daemon (src/daemon.js)
@@ -22,6 +22,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { configPath, findChat, loadConfig } from './config.js';
+import { MAX_SPEAK_CHARS, removeSpokenFile, speakToFile } from './speech.js';
 import { appendOutboxCommand, checkSendableFile, cursorPath, inboxPath, readMessages, readNewLines, tailJsonLines } from './wa-client.js';
 
 const SEND_ACK_TIMEOUT_MS = 15000;
@@ -193,6 +194,27 @@ export async function sendChatVoiceNote({ jid, path: filePath }) {
 }
 
 /**
+ * speak_voice_note: turns text into a voice note with the configured speak command (speech.speak) and sends it.
+ * The generated audio lives in the system temp directory only until the send is acked, then it is deleted.
+ */
+export async function speakVoiceNote({ jid, text }) {
+  postableChat(jid, 'sending');
+  if (typeof text !== 'string' || text.trim() === '') throw new Error('text must be a non-empty string.');
+  if (text.length > MAX_SPEAK_CHARS) throw new Error(`text is ${text.length} characters; a voice note is limited to ${MAX_SPEAK_CHARS}.`);
+  const { speech } = loadConfig();
+  if (!speech?.speak) {
+    throw new Error(`speech.speak is not configured in ${configPath()}; see "Speech" in the README to set up a voice.`);
+  }
+  const file = await speakToFile(speech.speak, text.trim());
+  try {
+    checkSendableFile('voice', file);
+    return await sendFileCommand({ type: 'send-voice', jid, path: file }, 'voice note');
+  } finally {
+    removeSpokenFile(file);
+  }
+}
+
+/**
  * react_to_message: puts an emoji reaction on one message in an allowlisted chat
  * (canPost required, same as sending), handed off to the daemon via outbox.jsonl
  * and confirmed by its ack. An empty emoji removes this account's reaction.
@@ -251,7 +273,8 @@ export async function pollChats() {
 
   const grouped = {};
   for (const entry of entries) {
-    if (entry?.type) continue;
+    // Protocol bookkeeping (send-acks, media notes) is skipped; a voice-note transcript is content, so it stays.
+    if (entry?.type && entry.type !== 'transcript') continue;
     const jid = entry.chatJid || 'unknown';
     if (!grouped[jid]) grouped[jid] = [];
     grouped[jid].push(entry);
@@ -403,6 +426,25 @@ export function buildServer() {
   );
 
   server.registerTool(
+    'speak_voice_note',
+    {
+      title: 'Speak text as a WhatsApp voice note',
+      description:
+        'Turns text into speech with the locally configured voice (speech.speak in the config) and sends it ' +
+        `as a voice note to an allowlisted chat that has canPost enabled. At most ${MAX_SPEAK_CHARS} characters. A voice ` +
+        'note cannot carry the agent marker, so the spoken text should make clear it comes from an ' +
+        'assistant. Fails with a setup hint when no voice is configured. Real people hear this immediately; ' +
+        'it cannot be unsent.',
+      inputSchema: {
+        jid: z.string().describe('WhatsApp chat jid, must be allowlisted with canPost: true'),
+        text: z.string().min(1).max(MAX_SPEAK_CHARS).describe(`What to say, at most ${MAX_SPEAK_CHARS} characters`),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    guard(({ jid, text }) => speakVoiceNote({ jid, text })),
+  );
+
+  server.registerTool(
     'react_to_message',
     {
       title: 'React to a WhatsApp message with an emoji',
@@ -442,6 +484,9 @@ export function buildServer() {
 async function main() {
   const server = buildServer();
   await server.connect(new StdioServerTransport());
+  // Exit through process.exit on a stop signal, so exit handlers run (speech.js stops a running voice engine
+  // and deletes its temp folder there).
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(0));
   // stdout is the MCP transport. Anything human-readable goes to stderr or it corrupts the protocol.
   process.stderr.write('whatsapp-assistant-mcp ready (stdio)\n');
 }

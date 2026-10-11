@@ -237,13 +237,59 @@ chats are downloaded to `~/.whatsapp-assistant/downloads/<timestamp>-<filename>`
 document keeps its sanitized name -- it is untrusted remote input -- while other media
 is named by type, such as `image.png`, `video.mp4` or `audio.mp3`). Voice notes go to
 their own folder, `downloads/voice-notes/<timestamp>-voice-note.ogg`. Size caps: 200 MB for videos, 25 MB for everything else. A saved
-voice note lets an agent transcribe what was said (for example with a local Whisper
-model) and treat it like a typed message; transcription is not part of this bridge.
+voice note can be transcribed by the bridge itself when speech is configured (see "Speech
+(optional)" below), or by an agent with any tool it likes.
 Each download adds a `media-saved` line to `inbox.jsonl` carrying `mediaPath`, beside the ordinary
 `[document: name]` message record; oversize or failed downloads add a
 `media-skipped` / `media-error` line instead, so an absent file is always
 explained. The allowlist gates downloads exactly as it gates the inbox:
 messages from non-allowlisted chats are neither stored nor downloaded.
+
+## Speech (optional)
+
+The bridge can turn incoming voice notes into text and speak text back as voice notes. Both
+run locally with open models -- no API keys -- and both are off until you configure them.
+
+**1. Install the default engines** (Python 3.10 to 3.12 -- Kokoro does not support 3.13 yet -- and ffmpeg):
+
+```bash
+python3 -m venv ~/.wa-speech
+~/.wa-speech/bin/pip install -r tools/requirements-speech.txt
+```
+
+Transcription uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and runs on a
+GPU when one is usable, otherwise on the CPU. Speaking uses
+[Kokoro](https://github.com/hexgrad/kokoro), which runs on a normal CPU. The first run of each
+downloads its model.
+
+**2. Add a `speech` block to the config** (use absolute paths):
+
+```json
+"speech": {
+  "transcribe": ["/path/to/.wa-speech/bin/python", "/path/to/whatsapp-assistant-mcp/tools/transcribe.py", "{input}"],
+  "speak": ["/path/to/.wa-speech/bin/python", "/path/to/whatsapp-assistant-mcp/tools/speak.py",
+            "--text-file", "{textFile}", "--output", "{output}"]
+}
+```
+
+Restart the daemon and the MCP server after changing the config.
+
+- **Transcribe:** every saved voice note is passed to the command as `{input}`; whatever it
+  prints becomes a `type: "transcript"` record in `inbox.jsonl` (with `text` and `mediaPath`)
+  and a `.txt` next to the audio. `poll_chats` delivers transcripts like messages. If the
+  command fails, a `transcript-error` record says why. Only real voice notes are transcribed
+  (never a document, whatever its name), one at a time, each with a 5-minute limit. A voice
+  note still waiting when the daemon stops is not transcribed later; its audio stays saved. Options: `--model` (default `small`;
+  `large-v3-turbo` is more accurate), `--languages en,de` to limit language detection.
+- **Speak:** `speak_voice_note` writes the text to `{textFile}`, runs the command, and sends
+  the Ogg/Opus file it wrote to `{output}` as a voice note; the audio is deleted after sending.
+  Options: `--voice` (default `af_heart`) and `--lang` (`a` American English, `b` British
+  English). The default install speaks English; Kokoro's other languages need extra packages
+  (see its README). Each voice note is made in a private temp folder that is deleted
+  afterwards, also when the command fails or times out.
+
+Any other engine works too: the commands are plain programs run without a shell, so point
+`transcribe` or `speak` at your own script, as long as it keeps the same placeholders.
 
 ## Retention
 
@@ -257,8 +303,10 @@ Saved voice notes are recordings of people's voices, which is personal data. An 
 Only `downloads/voice-notes/` is pruned, and only files named
 `<timestamp>-voice-note.<audio extension>` (regular files; links and folders are skipped).
 Voice notes older than `voiceNoteDays` are deleted first, then the oldest ones until the
-rest fit in `voiceNoteMaxMB`. Transcripts an agent wrote next to them (`*.txt`, `*.srt`,
-...) and every other download are left alone. Each deletion is logged to `daemon.log` by file name. Without
+rest fit in `voiceNoteMaxMB`. Transcripts next to them (`*.txt`, `*.srt`, ... -- including
+the ones the bridge writes when speech is configured) and the `transcript` records in
+`inbox.jsonl` are kept: they are personal data too, so delete them yourself if you do not
+need them. Every other download is left alone. Each deletion is logged to `daemon.log` by file name. Without
 a `retention` block nothing is ever deleted.
 
 ## Tools
@@ -272,6 +320,7 @@ a `retention` block nothing is ever deleted.
 | `send_chat_document` | Sends a file as a document, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
 | `send_chat_image` | Sends a PNG or JPEG as an inline image message, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
 | `send_chat_voice_note` | Sends an Ogg/Opus `.ogg` file as a voice note (plays inline like a recorded message) and waits for the echo-verified ack; requires `canPost: true` |
+| `speak_voice_note` | Speaks text (at most 2000 characters, `MAX_SPEAK_CHARS` in `src/speech.js`) with the configured voice and sends it as a voice note; requires `canPost: true` and `speech.speak` (see "Speech") |
 | `react_to_message` | Puts an emoji reaction on one message (or removes it with an empty emoji) via the daemon and waits for its ack; requires `canPost: true` |
 
 Every tool validates the jid against the allowlist before touching anything else. An

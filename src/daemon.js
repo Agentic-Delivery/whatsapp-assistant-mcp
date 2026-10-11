@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
+import { queueTranscription } from './speech.js';
 import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
@@ -48,7 +49,7 @@ export function recordKnock(record) {
   );
 }
 
-export function makeOnMessage(allowlist, onSkipped = () => {}) {
+export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}) {
   return (record, raw) => {
     if (!allowlist.has(record.chatJid)) {
       onSkipped(record);
@@ -62,6 +63,22 @@ export function makeOnMessage(allowlist, onSkipped = () => {}) {
           ? { ...record, type: 'media-saved', mediaPath: r.path, bytes: r.bytes, kind: r.kind, mimetype: r.mimetype }
           : { ...record, type: 'media-skipped', reason: r.skipped };
         appendInbox(note);
+        // A saved voice note becomes text when a transcribe command is configured: the transcript is appended to
+        // the inbox as its own record (so any agent can read what was said) and written next to the audio.
+        // r.voiceNote is set by the download from the message type itself, never from a sender-chosen file name.
+        if (r.path && r.voiceNote && speech.transcribe) {
+          return queueTranscription(speech.transcribe, r.path)
+            .then((text) => {
+              const rec = { ...record, type: 'transcript', text, mediaPath: r.path };
+              try {
+                fs.writeFileSync(r.path + '.txt', text + '\n');
+              } catch (err) {
+                rec.warning = `transcript file not written: ${err?.message || err}`;
+              }
+              appendInbox(rec);
+            })
+            .catch((err) => appendInbox({ ...record, type: 'transcript-error', error: String(err?.message || err), mediaPath: r.path }));
+        }
       })
       .catch((err) => {
         appendInbox({ ...record, type: 'media-error', error: String(err?.message || err) });
@@ -279,7 +296,7 @@ async function main() {
   try {
     connection = await connect({
       reconnect: true,
-      onMessage: makeOnMessage(allowlist, (record) => { skippedCount += 1; recordKnock(record); }),
+      onMessage: makeOnMessage(allowlist, (record) => { skippedCount += 1; recordKnock(record); }, config.speech || {}),
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });
