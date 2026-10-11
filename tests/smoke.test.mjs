@@ -432,6 +432,7 @@ test('an allowlisted VOICE NOTE is downloaded as voice-note.ogg so an agent can 
   assert.ok(saved, 'media-saved note missing for voice note');
   assert.equal(saved.kind, 'audio');
   assert.ok(saved.mediaPath.endsWith('-voice-note.ogg'), `expected voice-note.ogg, got ${saved.mediaPath}`);
+  assert.equal(path.basename(path.dirname(saved.mediaPath)), 'voice-notes', 'voice notes live in their own folder, the only place retention prunes');
   const { mediaFilename } = await import('../src/wa-client.js');
   assert.equal(mediaFilename('audio', { mimetype: 'audio/mpeg' }), 'audio.mp3', 'a plain audio file keeps its type');
   assert.equal(mediaFilename('video', { mimetype: 'video/mp4; codecs=avc1' }), 'video.mp4', 'mimetype parameters are ignored');

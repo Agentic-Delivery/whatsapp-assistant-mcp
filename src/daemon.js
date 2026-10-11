@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
-import { connect, appendInbox, sendText, sendDocument, sendImage, checkSendableFile, sendReaction, deleteOwnMessage, downloadDocument, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -77,7 +77,7 @@ export function makeOnMessage(allowlist, onSkipped = () => {}) {
  * carrying the same nonce so the waiting MCP tool call can pick it up.
  */
 /** The one list of outbox command types the watcher hands to handleSendCommand. A type handled there but missing here is silently skipped. */
-export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'react', 'delete']);
+export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice', 'react', 'delete']);
 
 export async function handleSendCommand(cmd, config) {
   const { jid, text, nonce } = cmd;
@@ -120,6 +120,22 @@ export async function handleSendCommand(cmd, config) {
           if (im.fileLength != null && Number(im.fileLength) !== bytes) problems.push(`size ${im.fileLength} != ${bytes}`);
           if (problems.length) throw new Error(`image echoed malformed (${problems.join(', ')}); msgId ${msgId}`);
           ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: { mimetype: im.mimetype, bytes: Number(im.fileLength ?? bytes) } };
+        } else {
+          ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: null, warning: 'echo-timeout: delivery unverified' };
+        }
+      } else if (cmd.type === 'send-voice') {
+        // {type:'send-voice', jid, nonce, path}: an Ogg/Opus file sent as a voice note. A voice note has no
+        // caption, so the agent marker cannot be stamped on it; the sender should say it is the assistant.
+        const { bytes } = checkSendableFile('voice', cmd.path);
+        msgId = await sendVoiceNote(jid, cmd.path);
+        const echo = await awaitEcho(msgId, cmd.echoTimeoutMs ?? 15000);
+        if (echo) {
+          const au = echo.message?.audioMessage || {};
+          const problems = [];
+          if (!au.ptt) problems.push('not a voice note (ptt missing)');
+          if (au.fileLength != null && Number(au.fileLength) !== bytes) problems.push(`size ${au.fileLength} != ${bytes}`);
+          if (problems.length) throw new Error(`voice note echoed malformed (${problems.join(', ')}); msgId ${msgId}`);
+          ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: { ptt: true, mimetype: au.mimetype || null, bytes: Number(au.fileLength ?? bytes), seconds: au.seconds ?? null } };
         } else {
           ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: null, warning: 'echo-timeout: delivery unverified' };
         }
@@ -296,6 +312,18 @@ async function main() {
   }
   const stopOutboxWatcher = startOutboxWatcher(config, outboxStartOffset);
 
+  // Voice-note retention (config "retention"): at startup and hourly; deletions are logged by file name only.
+  const prune = () => {
+    try {
+      const r = pruneVoiceNotes(path.join(waHome(), 'downloads'), config.retention || {});
+      if (r.deleted.length) logDaemon({ ts: Date.now(), type: 'retention', deleted: r.deleted, kept: r.kept, bytes: r.bytes });
+    } catch (err) {
+      logDaemon({ ts: Date.now(), type: 'retention-error', error: String(err?.message || err) });
+    }
+  };
+  prune();
+  const retentionTimer = setInterval(prune, 3600000);
+
   const heartbeat = setInterval(() => {
     logDaemon({
       ts: Date.now(),
@@ -307,6 +335,7 @@ async function main() {
 
   const shutdown = () => {
     clearInterval(heartbeat);
+    clearInterval(retentionTimer);
     stopOutboxWatcher();
     process.exit(0);
   };

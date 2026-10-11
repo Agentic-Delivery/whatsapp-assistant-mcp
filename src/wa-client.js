@@ -244,6 +244,45 @@ export function mediaFilename(kind, part) {
   return `${stem}.${ext}`;
 }
 
+/**
+ * Deletes saved voice notes in <downloads>/voice-notes/ (only files named <timestamp>-voice-note.<audio ext>;
+ * transcripts, links, folders and every other download are kept):
+ * first those older than voiceNoteDays, then the oldest until the rest fit in voiceNoteMaxMB. Returns what it did.
+ */
+export const VOICE_NOTE_DIR = 'voice-notes';
+const VOICE_NOTE_NAME = /^\d+-voice-note\.(ogg|mp3|m4a|aac|wav|amr|webm|bin)$/i;
+
+export function pruneVoiceNotes(downloadsDir, { voiceNoteDays = null, voiceNoteMaxMB = null } = {}, now = Date.now()) {
+  const dir = path.join(downloadsDir, VOICE_NOTE_DIR);
+  if (!fs.existsSync(dir) || (voiceNoteDays === null && voiceNoteMaxMB === null)) return { deleted: [], kept: 0, bytes: 0 };
+  const files = [];
+  for (const n of fs.readdirSync(dir)) {
+    if (!VOICE_NOTE_NAME.test(n)) continue; // transcripts (*.txt, *.srt, ...) and anything else stay
+    try {
+      const p = path.join(dir, n);
+      const st = fs.lstatSync(p);
+      if (st.isFile()) files.push({ p, mtime: st.mtimeMs, size: st.size }); // never follow or delete links/dirs
+    } catch { /* vanished or unreadable: skip, never stop the whole run */ }
+  }
+  files.sort((a, b) => a.mtime - b.mtime);
+  const deleted = [];
+  let keep = files;
+  if (voiceNoteDays !== null) {
+    const cutoff = now - voiceNoteDays * 86400000;
+    deleted.push(...keep.filter((f) => f.mtime < cutoff));
+    keep = keep.filter((f) => f.mtime >= cutoff);
+  }
+  let bytes = keep.reduce((t, f) => t + f.size, 0);
+  if (voiceNoteMaxMB !== null) {
+    while (keep.length && bytes > voiceNoteMaxMB * 1024 * 1024) { const f = keep.shift(); bytes -= f.size; deleted.push(f); }
+  }
+  const removed = [];
+  for (const f of deleted) {
+    try { fs.rmSync(f.p); removed.push(path.basename(f.p)); } catch { /* not removed: not reported as deleted */ }
+  }
+  return { deleted: removed, kept: keep.length, bytes };
+}
+
 /** Single gate for "should this message's media be saved" — the daemon must use this, never inspect message keys itself. */
 export function hasSavableMedia(rawMsg) {
   return !!mediaPart(rawMsg);
@@ -257,8 +296,10 @@ export async function downloadDocument(rawMsg, destDir, maxBytes) {
   const declared = Number(part.fileLength || 0);
   if (declared > maxBytes) return { skipped: `too-large:${declared}` };
   const base = mediaFilename(kind, part);
-  fs.mkdirSync(destDir, { recursive: true });
-  const dest = path.join(destDir, `${Date.now()}-${base}`);
+  // Voice notes get their own folder: retention prunes only there, so no other download can ever match it.
+  const dir = kind === 'audio' && part.ptt ? path.join(destDir, VOICE_NOTE_DIR) : destDir;
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = path.join(dir, `${Date.now()}-${base}`);
   const { downloadMediaMessage } = await loadBaileysModule();
   const buf = await downloadMediaMessage(rawMsg, 'buffer', {});
   if (!buf || buf.length === 0) return { skipped: 'empty-download' };
@@ -510,6 +551,7 @@ export function mimetypeFor(fileName) {
 /** Upper bounds for outgoing media. The daemon reads the whole file into memory before sending. */
 export const MAX_DOCUMENT_BYTES = 100 * 1024 * 1024;
 export const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_VOICE_BYTES = 16 * 1024 * 1024;
 /** Image types sent as an inline image message (anything else goes as a document). */
 export const IMAGE_MIMETYPES = new Set(['image/png', 'image/jpeg']);
 
@@ -545,6 +587,14 @@ export function checkSendableFile(kind, filePath, fileName) {
   }
   const name = fileName || path.basename(filePath);
   const mimetype = mimetypeFor(name);
+  if (kind === 'voice') {
+    // A voice note must be Ogg/Opus to play as a voice note (with a waveform) on every client.
+    if (path.extname(filePath).toLowerCase() !== '.ogg') {
+      throw new Error(`a voice note must be an Ogg/Opus .ogg file (got ${path.basename(filePath)}); convert with: ffmpeg -i in.wav -c:a libopus -b:a 32k -ac 1 out.ogg`);
+    }
+    if (st.size > MAX_VOICE_BYTES) throw new Error(`voice note is ${st.size} bytes; the limit is ${MAX_VOICE_BYTES}.`);
+    return { bytes: st.size, mimetype: 'audio/ogg; codecs=opus' };
+  }
   if (kind === 'image') {
     if (!IMAGE_MIMETYPES.has(mimetypeFor(filePath))) {
       throw new Error(`an image must be a .png, .jpg or .jpeg file (got ${path.basename(filePath)}); send other files as a document.`);
@@ -570,6 +620,16 @@ export async function sendImage(jid, filePath, caption) {
     mimetype: mimetypeFor(filePath),
     ...(caption ? { caption } : {}),
   });
+  return result?.key?.id || null;
+}
+
+/** Sends an Ogg/Opus file as a voice note (ptt), so it plays inline like a recorded message. Daemon-only. */
+export async function sendVoiceNote(jid, filePath) {
+  if (!sockRef) {
+    throw new Error('No active WhatsApp connection. sendVoiceNote() must run inside the daemon process.');
+  }
+  const buffer = fs.readFileSync(filePath);
+  const result = await sockRef.sendMessage(jid, { audio: buffer, mimetype: 'audio/ogg; codecs=opus', ptt: true });
   return result?.key?.id || null;
 }
 

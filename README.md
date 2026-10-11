@@ -180,12 +180,14 @@ automatically; a lock held by a live process is refused rather than raced.
 
 ## Verified sends
 
-Every `send`/`send-file`/`send-image` ack is **echo-verified**: WhatsApp reflects each sent
+Every `send`/`send-file`/`send-image`/`send-voice` ack is **echo-verified**: WhatsApp reflects each sent
 message back to the daemon, and that echo is exactly what recipients receive. The
 ack therefore reports what *arrived*, not what was attempted — `verified:
 {fileName, mimetype, bytes}` for documents (the echo must carry a file name, a real
 mimetype and the exact byte count, else `ok:false` with the reason), `verified:
-{mimetype, bytes}` for images, and `verified: {text:true}` for text. If no echo arrives within the timeout (default 15 s,
+{mimetype, bytes}` for images, `verified: {ptt, mimetype, bytes, seconds}` for voice
+notes (the echo must be a voice note, not a plain audio file), and `verified: {text:true}`
+for text. If no echo arrives within the timeout (default 15 s,
 `echoTimeoutMs` per command) the ack stays `ok:true` with `verified:null` and a
 `warning: echo-timeout` — a slow echo never fails a real send, but an unverified
 delivery is always visible as such.
@@ -195,7 +197,7 @@ delivery is always visible as such.
 `send_chat_document` sends a file as a document; `send_chat_image` sends a PNG or
 JPEG as an image message, so it shows inline in the chat (a screenshot, a rendered
 design). Both use the same allowlist and `canPost` gate and the same echo-verified
-ack as text. The MCP server checks every file before writing anything to the
+ack as text; `send_chat_voice_note` sends a voice note. The MCP server checks every file before writing anything to the
 outbox, and the daemon checks it again before sending (this applies to raw
 `send-file` commands too):
 
@@ -205,7 +207,11 @@ outbox, and the daemon checks it again before sending (this applies to raw
   file by it: `.pdf .docx .xlsx .pptx .md .txt .csv .json .html .png .jpg .jpeg .gif
   .webp .zip .mp4 .mov .webm .mp3 .m4a .wav`; images must be `.png`, `.jpg` or
   `.jpeg` (the type is taken from the extension, not by inspecting the bytes);
-- limits: 100 MB for documents, 16 MB for images;
+- voice notes must be Ogg/Opus `.ogg` files (like images, the type is taken from the
+  extension, not by inspecting the bytes); convert with `ffmpeg -i in.wav -c:a libopus
+  -b:a 32k -ac 1 out.ogg`; a voice note has no caption, so the agent marker cannot be
+  stamped on it, and the recording itself should make clear it comes from an assistant;
+- limits: 100 MB for documents, 16 MB for images and voice notes;
 - nothing inside the bridge's own state directory (`~/.whatsapp-assistant`: auth
   keys, inbox, outbox, downloads) can be sent, symlinks included, so a manipulated
   request cannot send the account's session keys out. To forward a downloaded file,
@@ -217,6 +223,7 @@ The raw outbox commands, for scripts that run next to the daemon:
 |---|---|
 | send a document | `{"type":"send-file", "jid", "nonce", "path", "fileName?", "caption?"}` |
 | send an image | `{"type":"send-image", "jid", "nonce", "path", "caption?"}` |
+| send a voice note | `{"type":"send-voice", "jid", "nonce", "path"}` (Ogg/Opus `.ogg`) |
 | delete one of this account's own messages for everyone | `{"type":"delete", "jid", "nonce", "msgId"}` |
 
 `delete` can only remove a message this account sent; it never touches anyone else's.
@@ -228,8 +235,8 @@ belonged to one of this account's messages; an id that was not ours is a no-op.
 Incoming **documents, images, videos, audio files and voice notes** from allowlisted
 chats are downloaded to `~/.whatsapp-assistant/downloads/<timestamp>-<filename>` (a
 document keeps its sanitized name -- it is untrusted remote input -- while other media
-is named by type, such as `image.png`, `video.mp4`, `audio.mp3`, or `voice-note.ogg`
-for a voice note). Size caps: 200 MB for videos, 25 MB for everything else. A saved
+is named by type, such as `image.png`, `video.mp4` or `audio.mp3`). Voice notes go to
+their own folder, `downloads/voice-notes/<timestamp>-voice-note.ogg`. Size caps: 200 MB for videos, 25 MB for everything else. A saved
 voice note lets an agent transcribe what was said (for example with a local Whisper
 model) and treat it like a typed message; transcription is not part of this bridge.
 Each download adds a `media-saved` line to `inbox.jsonl` carrying `mediaPath`, beside the ordinary
@@ -237,6 +244,22 @@ Each download adds a `media-saved` line to `inbox.jsonl` carrying `mediaPath`, b
 `media-skipped` / `media-error` line instead, so an absent file is always
 explained. The allowlist gates downloads exactly as it gates the inbox:
 messages from non-allowlisted chats are neither stored nor downloaded.
+
+## Retention
+
+Saved voice notes are recordings of people's voices, which is personal data. An optional
+`retention` block in the config makes the daemon delete them at startup and every hour:
+
+```json
+"retention": { "voiceNoteDays": 30, "voiceNoteMaxMB": 200 }
+```
+
+Only `downloads/voice-notes/` is pruned, and only files named
+`<timestamp>-voice-note.<audio extension>` (regular files; links and folders are skipped).
+Voice notes older than `voiceNoteDays` are deleted first, then the oldest ones until the
+rest fit in `voiceNoteMaxMB`. Transcripts an agent wrote next to them (`*.txt`, `*.srt`,
+...) and every other download are left alone. Each deletion is logged to `daemon.log` by file name. Without
+a `retention` block nothing is ever deleted.
 
 ## Tools
 
@@ -248,6 +271,7 @@ messages from non-allowlisted chats are neither stored nor downloaded.
 | `poll_chats` | Messages that arrived since the last call, grouped by chat jid; the read position is persisted, so each message is returned exactly once |
 | `send_chat_document` | Sends a file as a document, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
 | `send_chat_image` | Sends a PNG or JPEG as an inline image message, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
+| `send_chat_voice_note` | Sends an Ogg/Opus `.ogg` file as a voice note (plays inline like a recorded message) and waits for the echo-verified ack; requires `canPost: true` |
 | `react_to_message` | Puts an emoji reaction on one message (or removes it with an empty emoji) via the daemon and waits for its ack; requires `canPost: true` |
 
 Every tool validates the jid against the allowlist before touching anything else. An

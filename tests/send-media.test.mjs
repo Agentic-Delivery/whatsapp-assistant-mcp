@@ -141,7 +141,7 @@ test('(m6) a real MCP client over stdio sees send_chat_document and send_chat_im
   await client.connect(transport);
   try {
     const names = (await client.listTools()).tools.map((t) => t.name);
-    for (const n of ['send_chat_document', 'send_chat_image', 'send_chat_message', 'react_to_message']) assert.ok(names.includes(n), `${n} must be exposed`);
+    for (const n of ['send_chat_document', 'send_chat_image', 'send_chat_voice_note', 'send_chat_message', 'react_to_message']) assert.ok(names.includes(n), `${n} must be exposed`);
     const refused = await client.callTool({ name: 'send_chat_image', arguments: { jid: '9999999999@s.whatsapp.net', path: '/nope.png' } });
     assert.equal(refused.isError, true, 'a refusal reaches the model as a readable error result');
   } finally {
@@ -199,4 +199,75 @@ test('(m9) an image whose echo carries a different size gets ok:false -- the ack
   const a1 = acks.find((a) => a.nonce === 's1'), a2 = acks.find((a) => a.nonce === 's2');
   assert.equal(a1.ok, false); assert.match(a1.error, /size/);
   assert.equal(a2.ok, true); assert.equal(a2.verified, null); assert.match(a2.warning, /echo-timeout/);
+});
+
+test('(v1) send_chat_voice_note refuses non-.ogg files and canPost:false chats before touching outbox', async () => {
+  const F = filesDir();
+  const dir = home([{ jid: POST, name: 'Docs', canPost: true }, { jid: READONLY, name: 'RO', canPost: false }]);
+  const { sendChatVoiceNote } = await import('../src/mcp-server.js');
+  const mp3 = path.join(F, 'reply.mp3'); fs.writeFileSync(mp3, 'mp3');
+  const ogg = path.join(F, 'reply.ogg'); fs.writeFileSync(ogg, 'ogg');
+  await assert.rejects(() => sendChatVoiceNote({ jid: POST, path: mp3 }), /Ogg\/Opus/);
+  await assert.rejects(() => sendChatVoiceNote({ jid: READONLY, path: ogg }), /canPost:false/);
+  const { MAX_VOICE_BYTES } = await import('../src/wa-client.js');
+  const big = path.join(F, 'long.ogg'); fs.writeFileSync(big, ''); fs.truncateSync(big, MAX_VOICE_BYTES + 1);
+  await assert.rejects(() => sendChatVoiceNote({ jid: POST, path: big }), /the limit is/);
+  assert.equal(outboxLines(dir).length, 0);
+});
+
+test('(v2) send_chat_voice_note round-trips as a ptt audio message with an echo-verified ack', async () => {
+  const F = filesDir();
+  const dir = home([{ jid: POST, name: 'Docs', canPost: true }]);
+  const { connect } = await import('../src/wa-client.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const { sendChatVoiceNote } = await import('../src/mcp-server.js');
+  const ogg = path.join(F, 'reply.ogg'); fs.writeFileSync(ogg, 'opus-bytes');
+  const [res, cmd] = await Promise.all([sendChatVoiceNote({ jid: POST, path: ogg }), pumpOnce(dir)]);
+  assert.equal(cmd.type, 'send-voice');
+  const sent = createdSockets.at(-1).__sent.at(-1);
+  assert.ok(sent.content.audio, 'must be sent as audio');
+  assert.equal(sent.content.ptt, true, 'must be a voice note (ptt), not an audio file');
+  assert.equal(sent.content.mimetype, 'audio/ogg; codecs=opus');
+  assert.equal(res.verified.ptt, true);
+  assert.equal(res.verified.bytes, 10);
+});
+
+test('(v3) the daemon fails a voice note that echoes back without ptt -- it arrived as a plain audio file', async () => {
+  const F = filesDir();
+  const dir = home([{ jid: POST, name: 'Docs', canPost: true }]);
+  const { connect } = await import('../src/wa-client.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  const ogg = path.join(F, 'r.ogg'); fs.writeFileSync(ogg, 'opus');
+  createdSockets.at(-1).__echoMode = 'notptt';
+  await handleSendCommand({ ts: Date.now(), type: 'send-voice', jid: POST, path: ogg, nonce: 'p1', echoTimeoutMs: 2000 }, loadConfig());
+  const acks = fs.readFileSync(path.join(dir, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'send-ack');
+  const a = acks.find((x) => x.nonce === 'p1');
+  assert.equal(a.ok, false); assert.match(a.error, /ptt/);
+});
+
+test('(v4) the daemon re-checks a raw send-voice: a .mp3 or a state-directory file is refused; a wrong-size echo gives ok:false', async () => {
+  const F = filesDir();
+  const dir = home([{ jid: POST, name: 'Docs', canPost: true }]);
+  const { connect } = await import('../src/wa-client.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  const mp3 = path.join(F, 'r.mp3'); fs.writeFileSync(mp3, 'mp3');
+  const inState = path.join(dir, 'secret.ogg'); fs.writeFileSync(inState, 'ogg');
+  const ok = path.join(F, 'r.ogg'); fs.writeFileSync(ok, 'opus');
+  const before = createdSockets.at(-1).__sent.length;
+  await handleSendCommand({ ts: Date.now(), type: 'send-voice', jid: POST, path: mp3, nonce: 'q1' }, loadConfig());
+  await handleSendCommand({ ts: Date.now(), type: 'send-voice', jid: POST, path: inState, nonce: 'q2' }, loadConfig());
+  assert.equal(createdSockets.at(-1).__sent.length, before, 'neither may be sent');
+  createdSockets.at(-1).__echoMode = 'wrongsize';
+  await handleSendCommand({ ts: Date.now(), type: 'send-voice', jid: POST, path: ok, nonce: 'q3', echoTimeoutMs: 2000 }, loadConfig());
+  const acks = fs.readFileSync(path.join(dir, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'send-ack');
+  assert.match(acks.find((a) => a.nonce === 'q1').error, /Ogg\/Opus/);
+  assert.match(acks.find((a) => a.nonce === 'q2').error, /state directory/);
+  const a3 = acks.find((a) => a.nonce === 'q3'); assert.equal(a3.ok, false); assert.match(a3.error, /size/);
 });

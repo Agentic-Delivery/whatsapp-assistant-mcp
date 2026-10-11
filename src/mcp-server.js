@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Stdio MCP server (name: whatsapp-assistant). Exposes seven tools: list_chats,
+// Stdio MCP server (name: whatsapp-assistant). Exposes eight tools: list_chats,
 // read_chat_messages, poll_chats, send_chat_message, send_chat_document,
-// send_chat_image and react_to_message.
+// send_chat_image, send_chat_voice_note and react_to_message.
 //
 // This process NEVER opens its own Baileys connection -- Baileys refuses a second
 // simultaneous connection against the same auth session, and the daemon (src/daemon.js)
@@ -179,6 +179,17 @@ export async function sendChatImage({ jid, path: filePath, caption }) {
   postableChat(jid, 'sending');
   checkSendableFile('image', filePath);
   return sendFileCommand({ type: 'send-image', jid, path: filePath, ...(caption ? { caption } : {}) }, 'image');
+}
+
+/**
+ * send_chat_voice_note: sends an Ogg/Opus file as a voice note, so it plays inline like a
+ * recorded message. Voice notes carry no caption, so the agent marker cannot be stamped on
+ * them -- the audio itself should say who is speaking.
+ */
+export async function sendChatVoiceNote({ jid, path: filePath }) {
+  postableChat(jid, 'sending');
+  checkSendableFile('voice', filePath);
+  return sendFileCommand({ type: 'send-voice', jid, path: filePath }, 'voice note');
 }
 
 /**
@@ -370,6 +381,25 @@ export function buildServer() {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     guard(({ jid, path: filePath, caption }) => sendChatImage({ jid, path: filePath, caption })),
+  );
+
+  server.registerTool(
+    'send_chat_voice_note',
+    {
+      title: 'Send a voice note to a WhatsApp chat',
+      description:
+        'Sends an Ogg/Opus .ogg file as a voice note (plays inline like a recorded message) to an ' +
+        'allowlisted chat that has canPost enabled. Voice notes have no caption and cannot carry the ' +
+        'agent marker, so the recording itself should make clear it comes from an assistant. path must ' +
+        'be absolute and readable by the daemon\'s user; at most 16 MB. Waits for the delivery to be ' +
+        'confirmed. Real people hear this immediately; it cannot be unsent.',
+      inputSchema: {
+        jid: z.string().describe('WhatsApp chat jid, must be allowlisted with canPost: true'),
+        path: z.string().min(1).describe('Absolute path to an Ogg/Opus .ogg file'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    guard(({ jid, path: filePath }) => sendChatVoiceNote({ jid, path: filePath })),
   );
 
   server.registerTool(

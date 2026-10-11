@@ -90,7 +90,23 @@ export function loadConfig() {
     };
   });
 
-  return { chats: normalized };
+  return { chats: normalized, retention: parseRetention(parsed.retention, file) };
+}
+
+/**
+ * Optional retention for saved voice notes (recordings of people's voices are personal data):
+ *   "retention": { "voiceNoteDays": 30, "voiceNoteMaxMB": 200 }
+ * Either key may be omitted; with no "retention" block nothing is ever deleted.
+ */
+function parseRetention(r, file) {
+  if (r === undefined || r === null) return { voiceNoteDays: null, voiceNoteMaxMB: null };
+  if (typeof r !== 'object' || Array.isArray(r)) throw new Error(`WhatsApp assistant config at ${file}: "retention" must be an object.`);
+  const num = (k) => {
+    if (r[k] === undefined || r[k] === null) return null;
+    if (typeof r[k] !== 'number' || !(r[k] > 0)) throw new Error(`WhatsApp assistant config at ${file}: retention.${k} must be a positive number.`);
+    return r[k];
+  };
+  return { voiceNoteDays: num('voiceNoteDays'), voiceNoteMaxMB: num('voiceNoteMaxMB') };
 }
 
 /** Finds an allowlist entry by exact jid match, or null if the jid isn't allowlisted. */

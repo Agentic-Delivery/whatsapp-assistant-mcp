@@ -27,7 +27,9 @@ export default function makeWASocket(_config) {
       // class), or no echo at all.
       const mode = sock.__echoMode || 'faithful';
       if (mode !== 'silent') {
-        const message = content.image
+        const message = content.audio
+          ? { audioMessage: { mimetype: content.mimetype, ptt: mode === 'notptt' ? false : !!content.ptt, fileLength: mode === 'wrongsize' ? content.audio.length + 1 : content.audio.length } }
+          : content.image
           ? { imageMessage: { mimetype: content.mimetype, fileLength: mode === 'wrongsize' ? content.image.length + 1 : content.image.length, caption: content.caption } }
           : content.document
           ? { documentMessage: mode === 'nameless'
