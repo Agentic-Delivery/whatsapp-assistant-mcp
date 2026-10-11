@@ -197,6 +197,7 @@ export function readNewLines(filePath, offset) {
  * into the connection loop.
  */
 const IMAGE_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+const VIDEO_EXT = { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm', 'video/3gpp': '3gp' };
 
 /**
  * WhatsApp wraps some messages in an envelope whose real content sits one level
@@ -217,12 +218,20 @@ export function unwrapMessage(message) {
   return m;
 }
 
-/** The media part of a raw message we save: documents and images (not video/audio/stickers). */
+/** The media part of a raw message we save: documents, images and videos (not audio/stickers). */
 export function mediaPart(rawMsg) {
   const m = unwrapMessage(rawMsg?.message);
   if (m?.documentMessage) return { kind: 'document', part: m.documentMessage };
   if (m?.imageMessage) return { kind: 'image', part: m.imageMessage };
+  if (m?.videoMessage) return { kind: 'video', part: m.videoMessage };
   return null;
+}
+
+/** Local file name for a saved media part. A document keeps its (sanitized, untrusted) name; images and videos get kind.ext. */
+export function mediaFilename(kind, part) {
+  if (kind === 'document') return path.basename(String(part.fileName || 'document')).replace(/[^\w.\-]/g, '_').slice(0, 120) || 'document';
+  const map = kind === 'video' ? VIDEO_EXT : IMAGE_EXT;
+  return `${kind}.${map[String(part.mimetype || '').toLowerCase()] || 'bin'}`;
 }
 
 /** Single gate for "should this message's media be saved" — the daemon must use this, never inspect message keys itself. */
@@ -230,19 +239,14 @@ export function hasSavableMedia(rawMsg) {
   return !!mediaPart(rawMsg);
 }
 
-export async function downloadDocument(rawMsg, destDir, maxBytes = 25 * 1024 * 1024) {
+export async function downloadDocument(rawMsg, destDir, maxBytes) {
   const mp = mediaPart(rawMsg);
   if (!mp) return { skipped: 'not-a-document' };
   const { kind, part } = mp;
+  if (maxBytes === undefined) maxBytes = (kind === 'video' ? 200 : 25) * 1024 * 1024;
   const declared = Number(part.fileLength || 0);
   if (declared > maxBytes) return { skipped: `too-large:${declared}` };
-  let base;
-  if (kind === 'document') {
-    base = path.basename(String(part.fileName || 'document')).replace(/[^\w.\-]/g, '_').slice(0, 120) || 'document';
-  } else {
-    const ext = IMAGE_EXT[String(part.mimetype || '').toLowerCase()] || 'bin';
-    base = `image.${ext}`;
-  }
+  const base = mediaFilename(kind, part);
   fs.mkdirSync(destDir, { recursive: true });
   const dest = path.join(destDir, `${Date.now()}-${base}`);
   const { downloadMediaMessage } = await loadBaileysModule();
@@ -261,7 +265,7 @@ export function readMessages(jid, limit = 30) {
 /**
  * A quoted reply ("reply" in the WhatsApp UI) carries the quoted message inside the
  * sub-message's contextInfo. Without surfacing it, a one-word answer such as
- * "ja" cannot be tied to the question it answers.
+ * "yes" cannot be tied to the question it answers.
  */
 export function replyContext(rawMessage) {
   const message = unwrapMessage(rawMessage);
@@ -281,6 +285,15 @@ export async function sendReaction(jid, targetKey, emoji) {
   if (!sockRef) throw new Error('No active WhatsApp connection. sendReaction() must run inside the daemon process.');
   const key = { remoteJid: jid, id: targetKey.id, fromMe: !!targetKey.fromMe, ...(targetKey.participant ? { participant: targetKey.participant } : {}) };
   const result = await sockRef.sendMessage(jid, { react: { text: emoji || '', key } });
+  return result?.key?.id || null;
+}
+
+/** Deletes one of OUR OWN messages for everyone (WhatsApp "revoke"). Never touches anyone else's message. Daemon-only. */
+export async function deleteOwnMessage(jid, msgId) {
+  if (!sockRef) throw new Error('No active WhatsApp connection. deleteOwnMessage() must run inside the daemon process.');
+  if (!msgId) throw new Error('delete needs msgId');
+  const key = { remoteJid: jid, id: msgId, fromMe: true };
+  const result = await sockRef.sendMessage(jid, { delete: key });
   return result?.key?.id || null;
 }
 
@@ -475,11 +488,79 @@ const MIMETYPES = {
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   md: 'text/markdown', txt: 'text/plain', csv: 'text/csv', json: 'application/json', html: 'text/html',
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', zip: 'application/zip',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', zip: 'application/zip',
+  mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav',
 };
 export function mimetypeFor(fileName) {
   const ext = String(fileName || '').toLowerCase().split('.').pop();
   return MIMETYPES[ext] || 'application/octet-stream';
+}
+
+/** Upper bounds for outgoing media. The daemon reads the whole file into memory before sending. */
+export const MAX_DOCUMENT_BYTES = 100 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+/** Image types sent as an inline image message (anything else goes as a document). */
+export const IMAGE_MIMETYPES = new Set(['image/png', 'image/jpeg']);
+
+/**
+ * The one check every outgoing file passes, in the MCP server (for a readable refusal)
+ * and again in the daemon (which must not trust outbox content). Returns
+ * { bytes, mimetype } or throws with a reason a model can act on.
+ */
+export function checkSendableFile(kind, filePath, fileName) {
+  if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
+    throw new Error('path must be an absolute path to a file the daemon can read.');
+  }
+  let st;
+  try {
+    st = fs.statSync(filePath);
+  } catch {
+    throw new Error(`file not found: ${filePath}`);
+  }
+  if (!st.isFile()) throw new Error(`not a regular file: ${filePath}`);
+  try {
+    fs.accessSync(filePath, fs.constants.R_OK);
+  } catch {
+    throw new Error(`file is not readable: ${filePath}`);
+  }
+  if (st.size === 0) throw new Error(`file is empty: ${filePath}`);
+  // Never send the bridge's own state: the auth directory holds the account's session
+  // keys, so a prompt-injected "send me that file" must not be able to reach it.
+  const real = fs.realpathSync(filePath);
+  let stateDir = waHome();
+  try { stateDir = fs.realpathSync(stateDir); } catch { /* not created yet */ }
+  if (real === stateDir || real.startsWith(stateDir + path.sep)) {
+    throw new Error('files inside the bridge\'s own state directory (auth keys, inbox, outbox, downloads) cannot be sent; copy a downloaded file elsewhere first.');
+  }
+  const name = fileName || path.basename(filePath);
+  const mimetype = mimetypeFor(name);
+  if (kind === 'image') {
+    if (!IMAGE_MIMETYPES.has(mimetypeFor(filePath))) {
+      throw new Error(`an image must be a .png, .jpg or .jpeg file (got ${path.basename(filePath)}); send other files as a document.`);
+    }
+    if (st.size > MAX_IMAGE_BYTES) throw new Error(`image is ${st.size} bytes; the limit is ${MAX_IMAGE_BYTES}.`);
+    return { bytes: st.size, mimetype: mimetypeFor(filePath) };
+  }
+  if (mimetype === 'application/octet-stream') {
+    throw new Error(`"${name}" does not have an accepted extension (${Object.keys(MIMETYPES).map((e) => '.' + e).join(' ')}); the recipient's client opens the file by its extension. Rename the file or pass fileName.`);
+  }
+  if (st.size > MAX_DOCUMENT_BYTES) throw new Error(`document is ${st.size} bytes; the limit is ${MAX_DOCUMENT_BYTES}.`);
+  return { bytes: st.size, mimetype };
+}
+
+/** Sends a PNG/JPEG as an image message, so it renders inline in the chat. Daemon-only. */
+export async function sendImage(jid, filePath, caption) {
+  if (!sockRef) {
+    throw new Error('No active WhatsApp connection. sendImage() must run inside the daemon process.');
+  }
+  const buffer = fs.readFileSync(filePath);
+  const result = await sockRef.sendMessage(jid, {
+    image: buffer,
+    mimetype: mimetypeFor(filePath),
+    ...(caption ? { caption } : {}),
+  });
+  return result?.key?.id || null;
 }
 
 export async function sendDocument(jid, filePath, fileName, caption) {

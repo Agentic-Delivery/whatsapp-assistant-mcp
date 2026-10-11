@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
-import { connect, appendInbox, sendText, sendDocument, sendReaction, downloadDocument, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, sendImage, checkSendableFile, sendReaction, deleteOwnMessage, downloadDocument, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -76,6 +76,9 @@ export function makeOnMessage(allowlist, onSkipped = () => {}) {
  * blindly trust file content), performs the send, and appends a send-ack record
  * carrying the same nonce so the waiting MCP tool call can pick it up.
  */
+/** The one list of outbox command types the watcher hands to handleSendCommand. A type handled there but missing here is silently skipped. */
+export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'react', 'delete']);
+
 export async function handleSendCommand(cmd, config) {
   const { jid, text, nonce } = cmd;
   let ack;
@@ -98,9 +101,31 @@ export async function handleSendCommand(cmd, config) {
         if (!cmd.msgId) throw new Error('react needs msgId');
         msgId = await sendReaction(jid, { id: cmd.msgId, fromMe: !!cmd.fromMe, participant: cmd.participant }, cmd.emoji ?? '');
         ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, reacted: { target: cmd.msgId, emoji: cmd.emoji ?? '' } };
+      } else if (cmd.type === 'delete') {
+        // {type:'delete', jid, nonce, msgId}: deletes one of OUR OWN earlier messages for everyone.
+        // fromMe is forced true inside deleteOwnMessage, so this can never remove another person's message.
+        msgId = await deleteOwnMessage(jid, cmd.msgId);
+        ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, deleted: cmd.msgId };
+      } else if (cmd.type === 'send-image') {
+        // {type:'send-image', jid, nonce, path, caption?}: a PNG/JPEG sent as an image message (renders inline).
+        const { bytes } = checkSendableFile('image', cmd.path);
+        const cap = cmd.caption ? (cmd.caption.startsWith(SIG) ? cmd.caption : SIG + cmd.caption) : undefined;
+        msgId = await sendImage(jid, cmd.path, cap);
+        // Verify what ARRIVED: the echo's imageMessage must carry a real image mimetype and our byte count.
+        const echo = await awaitEcho(msgId, cmd.echoTimeoutMs ?? 15000);
+        if (echo) {
+          const im = echo.message?.imageMessage || {};
+          const problems = [];
+          if (!im.mimetype || !im.mimetype.startsWith('image/')) problems.push(`mimetype ${im.mimetype || 'missing'}`);
+          if (im.fileLength != null && Number(im.fileLength) !== bytes) problems.push(`size ${im.fileLength} != ${bytes}`);
+          if (problems.length) throw new Error(`image echoed malformed (${problems.join(', ')}); msgId ${msgId}`);
+          ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: { mimetype: im.mimetype, bytes: Number(im.fileLength ?? bytes) } };
+        } else {
+          ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: null, warning: 'echo-timeout: delivery unverified' };
+        }
       } else if (cmd.type === 'send-file') {
         const fs2 = await import('node:fs');
-        if (!cmd.path || !fs2.existsSync(cmd.path)) throw new Error(`file not found: ${cmd.path}`);
+        checkSendableFile('document', cmd.path, cmd.fileName || cmd.filename);
         const cap = cmd.caption ? (cmd.caption.startsWith(SIG) ? cmd.caption : SIG + cmd.caption) : undefined;
         // The file name is what the recipient's client uses to open the file: a
         // nameless/extension-less document arrives as an unopenable blob even when
@@ -175,7 +200,7 @@ export function startOutboxWatcher(config, startOffset) {
       const { entries, newOffset } = readNewLines(outbox, offset);
       offset = newOffset;
       for (const cmd of entries) {
-        if (cmd?.type !== 'send' && cmd?.type !== 'send-file' && cmd?.type !== 'react') continue;
+        if (!OUTBOX_TYPES.has(cmd?.type)) continue;
         await handleSendCommand(cmd, config);
       }
     } catch (err) {

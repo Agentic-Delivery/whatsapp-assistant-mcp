@@ -180,21 +180,56 @@ automatically; a lock held by a live process is refused rather than raced.
 
 ## Verified sends
 
-Every `send`/`send-file` ack is **echo-verified**: WhatsApp reflects each sent
+Every `send`/`send-file`/`send-image` ack is **echo-verified**: WhatsApp reflects each sent
 message back to the daemon, and that echo is exactly what recipients receive. The
 ack therefore reports what *arrived*, not what was attempted — `verified:
 {fileName, mimetype, bytes}` for documents (the echo must carry a file name, a real
-mimetype and the exact byte count, else `ok:false` with the reason) and `verified:
-{text:true}` for text. If no echo arrives within the timeout (default 15 s,
+mimetype and the exact byte count, else `ok:false` with the reason), `verified:
+{mimetype, bytes}` for images, and `verified: {text:true}` for text. If no echo arrives within the timeout (default 15 s,
 `echoTimeoutMs` per command) the ack stays `ok:true` with `verified:null` and a
 `warning: echo-timeout` — a slow echo never fails a real send, but an unverified
 delivery is always visible as such.
 
-## Receiving documents
+## Sending files and images
 
-Incoming **document attachments** from allowlisted chats are downloaded to
-`~/.whatsapp-assistant/downloads/<timestamp>-<filename>` (filename sanitized —
-it is untrusted remote input — and size-capped at 25 MB). Each download adds a
+`send_chat_document` sends a file as a document; `send_chat_image` sends a PNG or
+JPEG as an image message, so it shows inline in the chat (a screenshot, a rendered
+design). Both use the same allowlist and `canPost` gate and the same echo-verified
+ack as text. The MCP server checks every file before writing anything to the
+outbox, and the daemon checks it again before sending (this applies to raw
+`send-file` commands too):
+
+- the path is **absolute** and points to a non-empty file **readable by the daemon's
+  user** (the daemon reads it, not the MCP server);
+- documents need an accepted extension, because the recipient's client opens the
+  file by it: `.pdf .docx .xlsx .pptx .md .txt .csv .json .html .png .jpg .jpeg .gif
+  .webp .zip .mp4 .mov .webm .mp3 .m4a .wav`; images must be `.png`, `.jpg` or
+  `.jpeg` (the type is taken from the extension, not by inspecting the bytes);
+- limits: 100 MB for documents, 16 MB for images;
+- nothing inside the bridge's own state directory (`~/.whatsapp-assistant`: auth
+  keys, inbox, outbox, downloads) can be sent, symlinks included, so a manipulated
+  request cannot send the account's session keys out. To forward a downloaded file,
+  copy it elsewhere first.
+
+The raw outbox commands, for scripts that run next to the daemon:
+
+| Command | Shape |
+|---|---|
+| send a document | `{"type":"send-file", "jid", "nonce", "path", "fileName?", "caption?"}` |
+| send an image | `{"type":"send-image", "jid", "nonce", "path", "caption?"}` |
+| delete one of this account's own messages for everyone | `{"type":"delete", "jid", "nonce", "msgId"}` |
+
+`delete` can only remove a message this account sent; it never touches anyone else's.
+Its ack (`ok:true, deleted: <msgId>`) means the revoke was sent, not that the id
+belonged to one of this account's messages; an id that was not ours is a no-op.
+
+## Receiving files
+
+Incoming **documents, images and videos** from allowlisted chats are downloaded to
+`~/.whatsapp-assistant/downloads/<timestamp>-<filename>` (a document keeps its
+sanitized name -- it is untrusted remote input -- while images and videos are named
+by type, such as `image.png` or `video.mp4`). Size caps: 25 MB for documents and
+images, 200 MB for videos. Each download adds a
 `media-saved` line to `inbox.jsonl` carrying `mediaPath`, beside the ordinary
 `[document: name]` message record; oversize or failed downloads add a
 `media-skipped` / `media-error` line instead, so an absent file is always
@@ -209,6 +244,8 @@ messages from non-allowlisted chats are neither stored nor downloaded.
 | `read_chat_messages` | Last N stored messages for one allowlisted chat, oldest first -- read from the local inbox log, not a live fetch |
 | `send_chat_message` | Sends a text message via the daemon and waits up to 15s for delivery confirmation; requires `canPost: true` |
 | `poll_chats` | Messages that arrived since the last call, grouped by chat jid; the read position is persisted, so each message is returned exactly once |
+| `send_chat_document` | Sends a file as a document, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
+| `send_chat_image` | Sends a PNG or JPEG as an inline image message, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
 | `react_to_message` | Puts an emoji reaction on one message (or removes it with an empty emoji) via the daemon and waits for its ack; requires `canPost: true` |
 
 Every tool validates the jid against the allowlist before touching anything else. An

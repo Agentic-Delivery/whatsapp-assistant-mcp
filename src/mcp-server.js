@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Stdio MCP server (name: whatsapp-assistant). Exposes four tools: list_chats,
-// read_chat_messages, send_chat_message, poll_chats.
+// Stdio MCP server (name: whatsapp-assistant). Exposes seven tools: list_chats,
+// read_chat_messages, poll_chats, send_chat_message, send_chat_document,
+// send_chat_image and react_to_message.
 //
 // This process NEVER opens its own Baileys connection -- Baileys refuses a second
 // simultaneous connection against the same auth session, and the daemon (src/daemon.js)
@@ -21,10 +22,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { configPath, findChat, loadConfig } from './config.js';
-import { appendOutboxCommand, cursorPath, inboxPath, readMessages, readNewLines, tailJsonLines } from './wa-client.js';
+import { appendOutboxCommand, checkSendableFile, cursorPath, inboxPath, readMessages, readNewLines, tailJsonLines } from './wa-client.js';
 
 const SEND_ACK_TIMEOUT_MS = 15000;
 const SEND_ACK_POLL_MS = 200;
+// A file has to upload before WhatsApp echoes it back, so file sends wait longer for the ack.
+const FILE_ACK_TIMEOUT_MS = 90000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -128,6 +131,54 @@ export async function sendChatMessage({ jid, text }) {
   // Surface what ARRIVED, not just that the attempt was acked: the daemon's
   // echo verification (or its absence) travels with the tool result.
   return { sent: true, msgId: ack.msgId, verified: ack.verified ?? null, ...(ack.warning ? { warning: ack.warning } : {}) };
+}
+
+/** The allowlist + canPost gate every sending tool shares. */
+function postableChat(jid, verb) {
+  const config = loadConfig();
+  const chat = findChat(config, jid);
+  if (!chat) {
+    throw new Error(`"${jid}" is not in the allowlist. Add it to ${configPath()} before ${verb}.`);
+  }
+  if (!chat.canPost) {
+    throw new Error(`"${jid}" (${chat.name}) has canPost:false in ${configPath()}. Set canPost:true to allow sending.`);
+  }
+  return chat;
+}
+
+async function sendFileCommand(command, what) {
+  const nonce = crypto.randomUUID();
+  appendOutboxCommand({ ts: Date.now(), nonce, ...command });
+  const ack = await waitForAck(nonce, FILE_ACK_TIMEOUT_MS);
+  if (!ack) {
+    throw new Error(`Timed out waiting ${FILE_ACK_TIMEOUT_MS / 1000}s for the daemon to send the ${what}. Is 'wa-daemon' running?`);
+  }
+  if (!ack.ok) {
+    throw new Error(`Send failed: ${ack.error || 'unknown error'}`);
+  }
+  return { sent: true, msgId: ack.msgId, verified: ack.verified ?? null, ...(ack.warning ? { warning: ack.warning } : {}) };
+}
+
+/**
+ * send_chat_document: sends a file as a document to an allowlisted chat with canPost
+ * enabled. The daemon reads the file itself, so path must be absolute and readable by
+ * the daemon's user. The file name (default: the file's own name) must carry a real
+ * extension -- it is what the recipient's client uses to open the file.
+ */
+export async function sendChatDocument({ jid, path: filePath, fileName, caption }) {
+  postableChat(jid, 'sending');
+  checkSendableFile('document', filePath, fileName);
+  return sendFileCommand({ type: 'send-file', jid, path: filePath, ...(fileName ? { fileName } : {}), ...(caption ? { caption } : {}) }, 'document');
+}
+
+/**
+ * send_chat_image: sends a PNG or JPEG as an image message, so it renders inline in
+ * the chat (a screenshot, a rendered design) instead of arriving as a file.
+ */
+export async function sendChatImage({ jid, path: filePath, caption }) {
+  postableChat(jid, 'sending');
+  checkSendableFile('image', filePath);
+  return sendFileCommand({ type: 'send-image', jid, path: filePath, ...(caption ? { caption } : {}) }, 'image');
 }
 
 /**
@@ -278,6 +329,47 @@ export function buildServer() {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     guard(({ jid, text }) => sendChatMessage({ jid, text })),
+  );
+
+  server.registerTool(
+    'send_chat_document',
+    {
+      title: 'Send a file to a WhatsApp chat',
+      description:
+        'Sends a file as a document to an allowlisted chat that has canPost enabled, with an ' +
+        'optional caption. The daemon reads the file, so path must be absolute and readable by ' +
+        'the daemon\'s user; the file name needs a real extension (.pdf, .docx, ...) and the file ' +
+        'must be at most 100 MB. Waits for the delivery to be confirmed. Real people read this ' +
+        'immediately; it cannot be unsent.',
+      inputSchema: {
+        jid: z.string().describe('WhatsApp chat jid, must be allowlisted with canPost: true'),
+        path: z.string().min(1).describe('Absolute path to the file'),
+        fileName: z.string().optional().describe('Name the recipient sees, with extension; default: the file\'s own name'),
+        caption: z.string().optional().describe('Optional text shown with the file'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    guard(({ jid, path: filePath, fileName, caption }) => sendChatDocument({ jid, path: filePath, fileName, caption })),
+  );
+
+  server.registerTool(
+    'send_chat_image',
+    {
+      title: 'Send an image to a WhatsApp chat',
+      description:
+        'Sends a PNG or JPEG as an image message, so it shows inline in the chat (use ' +
+        'send_chat_document for other files), to an allowlisted chat that has canPost enabled, ' +
+        'with an optional caption. path must be absolute and readable by the daemon\'s user; at ' +
+        'most 16 MB. Waits for the delivery to be confirmed. Real people see this immediately; ' +
+        'it cannot be unsent.',
+      inputSchema: {
+        jid: z.string().describe('WhatsApp chat jid, must be allowlisted with canPost: true'),
+        path: z.string().min(1).describe('Absolute path to a .png, .jpg or .jpeg file'),
+        caption: z.string().optional().describe('Optional text shown under the image'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    guard(({ jid, path: filePath, caption }) => sendChatImage({ jid, path: filePath, caption })),
   );
 
   server.registerTool(

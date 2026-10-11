@@ -112,7 +112,7 @@ test('(e) send-file ships the document with a SIGNED caption; canPost:false refu
   await connect({ reconnect: false, onMessage: () => {} });
 
   const path2 = await import('node:path');
-  const filePath = path2.join(home, 'doc.pdf');
+  const filePath = path2.join(makeTempHome(), 'doc.pdf'); // outside WA_HOME: the bridge refuses to send its own state
   fs.writeFileSync(filePath, 'pdf-bytes');
   await handleSendCommand({ ts: Date.now(), type: 'send-file', jid, path: filePath, fileName: 'doc.pdf', caption: 'first version', nonce: 'f1' }, loadConfig());
 
@@ -138,7 +138,7 @@ test('(e2) send-file without fileName uses the file basename — a nameless docu
   const { createdSockets } = await import('./fixtures/fake-baileys.js');
   await connect({ reconnect: false, onMessage: () => {} });
   const path2 = await import('node:path');
-  const filePath = path2.join(home, 'quarterly-report.pdf');
+  const filePath = path2.join(makeTempHome(), 'quarterly-report.pdf'); // outside WA_HOME: the bridge refuses to send its own state
   fs.writeFileSync(filePath, 'pdf-bytes');
 
   // No fileName at all → the basename (with its extension) travels, never a bare "document".
@@ -163,7 +163,7 @@ test('(e3) a document that echoes NAMELESS gets ok:false — the ack reports wha
   const { createdSockets } = await import('./fixtures/fake-baileys.js');
   await connect({ reconnect: false, onMessage: () => {} });
   const path2 = await import('node:path');
-  const filePath = path2.join(home, 'brief.pdf');
+  const filePath = path2.join(makeTempHome(), 'brief.pdf'); // outside WA_HOME: the bridge refuses to send its own state
   fs.writeFileSync(filePath, 'pdf-bytes');
 
   createdSockets.at(-1).__echoMode = 'nameless';
@@ -293,6 +293,10 @@ test('(e8) documents get a real mimetype by extension — docx and md are not oc
   assert.equal(mimetypeFor('notes.MD'), 'text/markdown');
   assert.equal(mimetypeFor('deck.pdf'), 'application/pdf');
   assert.equal(mimetypeFor('mystery.bin'), 'application/octet-stream');
+  assert.equal(mimetypeFor('clip.mp4'), 'video/mp4');
+  assert.equal(mimetypeFor('clip.MOV'), 'video/quicktime');
+  assert.equal(mimetypeFor('loop.gif'), 'image/gif');
+  assert.equal(mimetypeFor('voice.mp3'), 'audio/mpeg');
 });
 
 test('(c) an inbound message for an allowlisted jid lands in inbox.jsonl; poll_chats drains it once, then returns empty', async () => {
@@ -428,6 +432,15 @@ test('20: the daemon download gate sees a captioned (wrapped) document as savabl
   const wrapped = { message: { messageContextInfo: {}, documentWithCaptionMessage: { message: { documentMessage: { fileName: 'x.md', mimetype: 'text/markdown' } } } } };
   assert.equal(hasSavableMedia(wrapped), true);
   assert.equal(hasSavableMedia({ message: { conversation: 'hello' } }), false);
+  // video sent as a video (not as a document) must be saved too, with a real extension
+  const vid = { message: { videoMessage: { mimetype: 'video/mp4', fileLength: 1000 } } };
+  assert.equal(hasSavableMedia(vid), true);
+  const { mediaPart: mp2, mediaFilename } = await import('../src/wa-client.js');
+  assert.equal(mp2(vid)?.kind, 'video');
+  assert.equal(mediaFilename('video', { mimetype: 'video/mp4' }), 'video.mp4');
+  assert.equal(mediaFilename('video', { mimetype: 'video/quicktime' }), 'video.mov');
+  assert.equal(mediaFilename('image', { mimetype: 'image/png' }), 'image.png');
+  assert.equal(mediaFilename('document', { fileName: '../evil name.pdf' }), 'evil_name.pdf');
   const daemonSrc = fs.readFileSync(new URL('../src/daemon.js', import.meta.url), 'utf8');
   assert.ok(!/raw\?\.message\?\.documentMessage/.test(daemonSrc), 'daemon must not inspect message keys directly');
 });
@@ -470,9 +483,9 @@ test('24: an unknown message type records its raw keys so it can be diagnosed', 
 
 test('25: the outbox drain dispatches react commands, not only send/send-file', async () => {
   const src = fs.readFileSync(new URL('../src/daemon.js', import.meta.url), 'utf8');
-  const m = src.match(/if \(cmd\?\.type !== 'send'[^\n]*\) continue;/);
-  assert.ok(m, 'dispatch filter line not found');
-  assert.ok(/'react'/.test(m[0]), 'react must be an accepted outbox command type');
+  assert.ok(/if \(!OUTBOX_TYPES\.has\(cmd\?\.type\)\) continue;/.test(src), 'the drain must filter on OUTBOX_TYPES');
+  const { OUTBOX_TYPES } = await import('../src/daemon.js');
+  assert.ok(OUTBOX_TYPES.has('react'), 'react must be an accepted outbox command type');
 });
 
 test('26: a secretEncryptedMessage records its target message key and inner field names (never the payload)', async () => {
@@ -518,4 +531,34 @@ test('27: react_to_message writes a react command the daemon dispatches, and res
   assert.equal(result.reacted, true);
   assert.equal(result.emoji, '✅');
   assert.equal(result.target, 'TARGET');
+});
+
+test('(h) delete revokes only our own message: the socket gets {delete: key} with fromMe forced true; canPost:false refuses', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = '7777777777@g.us';
+  const noPostJid = '8888888888@g.us';
+  writeConfig(home, { chats: [{ jid, name: 'Group', canPost: true }, { jid: noPostJid, name: 'ReadOnly', canPost: false }] });
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  await handleSendCommand({ ts: Date.now(), type: 'delete', jid, msgId: 'ABC123', fromMe: false, nonce: 'd1' }, loadConfig());
+  const sock = createdSockets.at(-1);
+  const del = sock.__sent.at(-1);
+  assert.ok(del && del.content && del.content.delete, 'the fake socket must have recorded a delete');
+  assert.equal(del.content.delete.id, 'ABC123');
+  assert.equal(del.content.delete.fromMe, true, 'a delete can only ever target our own message');
+  assert.equal(del.content.delete.remoteJid, jid);
+  const before = sock.__sent.length;
+  await handleSendCommand({ ts: Date.now(), type: 'delete', jid: noPostJid, msgId: 'XYZ', nonce: 'd2' }, loadConfig());
+  assert.equal(sock.__sent.length, before, 'canPost:false must refuse a delete');
+});
+
+test('(i) every command type handleSendCommand handles is let through by the outbox watcher', async () => {
+  const src = (await import('node:fs')).readFileSync(new URL('../src/daemon.js', import.meta.url), 'utf8');
+  const handled = [...src.matchAll(/cmd\.type === '([a-z-]+)'/g)].map((m) => m[1]);
+  const { OUTBOX_TYPES } = await import('../src/daemon.js');
+  for (const t of handled) assert.ok(OUTBOX_TYPES.has(t), `outbox watcher would silently skip "${t}"`);
+  assert.ok(OUTBOX_TYPES.has('send'), 'plain text sends must pass');
 });
