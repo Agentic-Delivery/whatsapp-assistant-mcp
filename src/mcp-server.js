@@ -104,7 +104,7 @@ async function waitForAck(nonce, timeoutMs) {
  * (max 15s) for the matching send-ack in inbox.jsonl. Never calls Baileys directly --
  * only the daemon does that.
  */
-export async function sendChatMessage({ jid, text }) {
+export async function sendChatMessage({ jid, text, mentions = [] }) {
   const config = loadConfig();
   const chat = findChat(config, jid);
   if (!chat) {
@@ -118,7 +118,7 @@ export async function sendChatMessage({ jid, text }) {
   }
 
   const nonce = crypto.randomUUID();
-  appendOutboxCommand({ ts: Date.now(), type: 'send', jid, text, nonce });
+  appendOutboxCommand({ ts: Date.now(), type: 'send', jid, text, nonce, ...(mentions.length ? { mentions } : {}) });
 
   const ack = await waitForAck(nonce, SEND_ACK_TIMEOUT_MS);
   if (!ack) {
@@ -359,10 +359,13 @@ export function buildServer() {
       inputSchema: {
         jid: z.string().describe('WhatsApp chat jid, must be allowlisted with canPost: true'),
         text: z.string().min(1).describe('Message text to send'),
+        mentions: z.array(z.string()).optional().describe(
+          'Person jids to tag (<number>@s.whatsapp.net or <number>@lid); the text must contain "@<number>" for each, ' +
+          'or the daemon refuses the send'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
-    guard(({ jid, text }) => sendChatMessage({ jid, text })),
+    guard(({ jid, text, mentions }) => sendChatMessage({ jid, text, mentions: mentions ?? [] })),
   );
 
   server.registerTool(

@@ -271,3 +271,31 @@ test('(v4) the daemon re-checks a raw send-voice: a .mp3 or a state-directory fi
   assert.match(acks.find((a) => a.nonce === 'q2').error, /state directory/);
   const a3 = acks.find((a) => a.nonce === 'q3'); assert.equal(a3.ok, false); assert.match(a3.error, /size/);
 });
+
+test('a text send carries its mentions, and a bad or untagged mention is refused', async () => {
+  const dir = home([{ jid: POST, name: 'Docs', canPost: true }]);
+  const { connect } = await import('../src/wa-client.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const { handleSendCommand } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  const who = '15550000001@s.whatsapp.net';
+  await handleSendCommand({ ts: Date.now(), type: 'send', jid: POST, text: 'hi @15550000001', mentions: [who], nonce: 'm1', echoTimeoutMs: 300 }, loadConfig());
+  await handleSendCommand({ ts: Date.now(), type: 'send', jid: POST, text: 'hi there', mentions: [who], nonce: 'm2', echoTimeoutMs: 300 }, loadConfig());
+  await handleSendCommand({ ts: Date.now(), type: 'send', jid: POST, text: 'hi @x', mentions: ['x'], nonce: 'm3', echoTimeoutMs: 300 }, loadConfig());
+  await handleSendCommand({ ts: Date.now(), type: 'send', jid: POST, text: 'hi @155500000012', mentions: [who], nonce: 'm4', echoTimeoutMs: 300 }, loadConfig());
+  await handleSendCommand({ ts: Date.now(), type: 'send', jid: POST, text: 'hi @15550000001', mentions: who, nonce: 'm5', echoTimeoutMs: 300 }, loadConfig());
+  await handleSendCommand({ ts: Date.now(), type: 'send', jid: POST, text: 'hi @15550000002', mentions: ['15550000002@lid'], nonce: 'm6', echoTimeoutMs: 300 }, loadConfig());
+  await handleSendCommand({ ts: Date.now(), type: 'send', jid: POST, text: 'plain', nonce: 'm7', echoTimeoutMs: 300 }, loadConfig());
+  const sent = createdSockets.at(-1).__sent.filter((s) => s.content.text);
+  assert.equal(sent.length, 3, 'only the valid sends reached WhatsApp');
+  assert.deepEqual(sent[0].content.mentions, [who]);
+  assert.deepEqual(sent[1].content.mentions, ['15550000002@lid']);
+  assert.equal('mentions' in sent[2].content, false, 'a send without mentions carries no mentions key');
+  const acks = fs.readFileSync(path.join(dir, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'send-ack');
+  const err = (n) => acks.find((a) => a.nonce === n);
+  assert.equal(err('m2').ok, false); assert.match(err('m2').error, /lacks @<number>/);
+  assert.equal(err('m3').ok, false); assert.match(err('m3').error, /invalid mention jid/);
+  assert.equal(err('m4').ok, false, 'a longer number in the text does not satisfy the mention'); assert.match(err('m4').error, /lacks @<number>/);
+  assert.equal(err('m5').ok, false); assert.match(err('m5').error, /expected an array/);
+});

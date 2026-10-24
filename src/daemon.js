@@ -184,7 +184,8 @@ export async function handleSendCommand(cmd, config) {
         }
       } else {
         const signed = text.startsWith(SIG) ? text : SIG + text;
-        msgId = await sendText(jid, signed);
+        if (cmd.mentions !== undefined && !Array.isArray(cmd.mentions)) throw new Error('invalid mentions: expected an array of jids');
+        msgId = await sendText(jid, signed, cmd.mentions ?? []);
         const echo = await awaitEcho(msgId, cmd.echoTimeoutMs ?? 15000);
         const echoed = echo?.message?.conversation ?? echo?.message?.extendedTextMessage?.text ?? null;
         ack = echo

@@ -221,6 +221,7 @@ The raw outbox commands, for scripts that run next to the daemon:
 
 | Command | Shape |
 |---|---|
+| send a text | `{"type":"send", "jid", "nonce", "text", "mentions?"}` |
 | send a document | `{"type":"send-file", "jid", "nonce", "path", "fileName?", "caption?"}` |
 | send an image | `{"type":"send-image", "jid", "nonce", "path", "caption?"}` |
 | send a voice note | `{"type":"send-voice", "jid", "nonce", "path"}` (Ogg/Opus `.ogg`) |
@@ -318,7 +319,7 @@ a `retention` block nothing is ever deleted.
 |---|---|
 | `list_chats` | Allowlisted chats with jid, name, `canPost`, and a lightweight recent-activity count |
 | `read_chat_messages` | Last N stored messages for one allowlisted chat, oldest first -- read from the local inbox log, not a live fetch |
-| `send_chat_message` | Sends a text message via the daemon and waits up to 15s for delivery confirmation; requires `canPost: true` |
+| `send_chat_message` | Sends a text message via the daemon and waits up to 15s for delivery confirmation; requires `canPost: true`. Optional `mentions` (person jids) tag people: the text must contain `@<number>` for each |
 | `poll_chats` | Messages that arrived since the last call, grouped by chat jid; the read position is persisted, so each message is returned exactly once |
 | `send_chat_document` | Sends a file as a document, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
 | `send_chat_image` | Sends a PNG or JPEG as an inline image message, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |

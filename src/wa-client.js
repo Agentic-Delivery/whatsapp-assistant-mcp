@@ -521,12 +521,19 @@ export function listChats() {
   return [...chatCache.values()];
 }
 
-/** Sends a text message through the live connection. Throws if nothing is connected. */
-export async function sendText(jid, text) {
+/** A mention is a person's jid; the text must carry "@<number>" for it to show as a tag. */
+const MENTION_JID = /^\d{5,20}@(s\.whatsapp\.net|lid)$/;
+
+/** Sends a text message through the live connection, tagging `mentions`. Throws if nothing is connected. */
+export async function sendText(jid, text, mentions = []) {
   if (!sockRef) {
     throw new Error('No active WhatsApp connection. sendText() must run inside the daemon process.');
   }
-  const result = await sockRef.sendMessage(jid, { text });
+  const bad = mentions.filter((m) => typeof m !== 'string' || !MENTION_JID.test(m));
+  if (bad.length) throw new Error(`invalid mention jid: ${bad.join(', ')}`);
+  const missing = mentions.filter((m) => !new RegExp(`@${m.split('@')[0]}(?!\\d)`).test(text));
+  if (missing.length) throw new Error(`text lacks @<number> for mention: ${missing.join(', ')}`);
+  const result = await sockRef.sendMessage(jid, mentions.length ? { text, mentions } : { text });
   return result?.key?.id || null;
 }
 
