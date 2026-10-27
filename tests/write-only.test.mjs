@@ -71,3 +71,40 @@ test('read_chat_messages refuses a write-only chat; poll_chats and list_chats ne
   assert.equal(alert.canRead, false);
   assert.equal(alert.recentMessageCount, 0);
 });
+
+test('a non-boolean canRead or canPost is refused, never read as a default', () => {
+  for (const bad of ['false', 0, null, 'no']) {
+    home([{ jid: ALERT, name: 'A', canPost: true, canRead: bad }]);
+    assert.throws(() => loadConfig(), /must be true or false/, `canRead: ${JSON.stringify(bad)}`);
+  }
+  home([{ jid: ALERT, name: 'A', canPost: 'true' }]);
+  assert.throws(() => loadConfig(), /must be true or false/);
+});
+
+test('a reply quoting a message from a chat we may not read keeps the link but not the quoted text', async () => {
+  const dir = home([{ jid: READ, name: 'R', canPost: true }, { jid: ALERT, name: 'A', canPost: true, canRead: false }]);
+  const { makeOnMessage, splitAllowlist } = await import('../src/daemon.js');
+  const onMessage = makeOnMessage(splitAllowlist(loadConfig()).readable);
+  await onMessage({ ts: 1, chatJid: READ, text: 'see this', msgId: 'p1', replyToMsgId: 'q1', replyToText: 'OWNER INTERNAL SECRET', replyToRemoteJid: ALERT }, {});
+  await onMessage({ ts: 2, chatJid: READ, text: 'normal reply', msgId: 'p2', replyToMsgId: 'q2', replyToText: 'readable quote', replyToRemoteJid: READ }, {});
+  const inbox = fs.readFileSync(path.join(dir, 'inbox.jsonl'), 'utf8');
+  assert.ok(!inbox.includes('OWNER INTERNAL SECRET'));
+  assert.ok(inbox.includes('"replyToTextWithheld":true'));
+  assert.ok(inbox.includes('readable quote'), 'a quote from the same readable chat is kept');
+});
+
+test('posting to a write-only chat still works, and our own echo there is not stored', async () => {
+  const dir = home([{ jid: ALERT, name: 'A', canPost: true, canRead: false }]);
+  const { connect } = await import('../src/wa-client.js');
+  const { handleSendCommand, makeOnMessage, splitAllowlist } = await import('../src/daemon.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  await handleSendCommand({ ts: Date.now(), type: 'send', jid: ALERT, text: 'alert: something broke', nonce: 'wo-1', echoTimeoutMs: 50 }, loadConfig());
+  const sent = createdSockets.at(-1).__sent.at(-1);
+  assert.equal(sent.jid ?? sent.to ?? ALERT, ALERT);
+  assert.match(String(sent.content?.text ?? sent.content), /alert: something broke/);
+  await makeOnMessage(splitAllowlist(loadConfig()).readable)({ ts: 3, chatJid: ALERT, text: 'alert: something broke', msgId: 'e1', fromMe: true }, {});
+  const inboxFile = path.join(dir, 'inbox.jsonl');
+  const inbox = fs.existsSync(inboxFile) ? fs.readFileSync(inboxFile, 'utf8') : '';
+  assert.ok(!inbox.split('\n').some((l) => l.includes('"chatJid":"222@g.us"')), 'no message line from the write-only chat');
+});

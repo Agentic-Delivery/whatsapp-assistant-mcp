@@ -328,6 +328,8 @@ export function replyContext(rawMessage) {
     replyToMsgId: ci.stanzaId || null,
     replyToParticipant: ci.participant || null,
     replyToText: extractText(ci.quotedMessage),
+    // The chat the quoted message lives in, when WhatsApp says (e.g. "Reply privately" from a group).
+    replyToRemoteJid: ci.remoteJid || null,
   };
 }
 

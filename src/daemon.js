@@ -57,11 +57,17 @@ export function splitAllowlist(config) {
   };
 }
 
-export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}) {
+export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, beforeEach = () => {}) {
   return (record, raw) => {
+    beforeEach();
     if (!allowlist.has(record.chatJid)) {
       onSkipped(record);
       return Promise.resolve();
+    }
+    // A reply that quotes a message from a chat we may not read (e.g. "Reply privately" from a
+    // write-only or non-allowlisted group) keeps the link but never the quoted text.
+    if (record.replyToRemoteJid && record.replyToRemoteJid !== record.chatJid && !allowlist.has(record.replyToRemoteJid)) {
+      record = { ...record, replyToText: null, replyToTextWithheld: true };
     }
     appendInbox(record);
     if (!hasSavableMedia(raw)) return Promise.resolve();
@@ -288,6 +294,24 @@ async function main() {
 
   // Only readable chats are stored; a write-only chat (canRead:false) is allowlisted for sending only.
   const { readable: allowlist, writeOnly } = splitAllowlist(config);
+  // The readable/write-only split follows config edits without a restart: changing a chat to
+  // canRead:false must stop storing it at once, because the runner reads inbox.jsonl directly.
+  // An invalid edit keeps the previous split and says so.
+  let configMtime = fs.existsSync(configPath()) ? fs.statSync(configPath()).mtimeMs : 0;
+  const refreshAllowlist = () => {
+    let m;
+    try { m = fs.statSync(configPath()).mtimeMs; } catch { return; }
+    if (m === configMtime) return;
+    configMtime = m;
+    try {
+      const next = splitAllowlist(loadConfig());
+      allowlist.clear(); for (const j of next.readable) allowlist.add(j);
+      writeOnly.clear(); for (const j of next.writeOnly) writeOnly.add(j);
+      console.log(`Reloaded allowlist: ${allowlist.size} readable, ${writeOnly.size} write-only.`);
+    } catch (err) {
+      console.error(`Config change ignored (kept the previous allowlist): ${err.message}`);
+    }
+  };
   console.log(`Loaded ${config.chats.length} allowlisted chat(s) (${writeOnly.size} write-only) from ${configPath()}`);
 
   const handleLoggedOut = (err) => {
@@ -300,8 +324,6 @@ async function main() {
   // deliberately never written to inbox.jsonl -- the allowlist is the blast-radius
   // control, and "not stored" must mean not stored, not "stored somewhere quieter".
   let skippedCount = 0;
-  // Messages seen in a write-only chat: counted, never stored, never knocked (the chat is known).
-  let skippedWriteOnly = 0;
 
   const outboxStartOffset = snapshotOutboxOffset();
   let connection;
@@ -309,10 +331,11 @@ async function main() {
     connection = await connect({
       reconnect: true,
       onMessage: makeOnMessage(allowlist, (record) => {
-        if (writeOnly.has(record.chatJid)) { skippedWriteOnly += 1; return; }
+        // A write-only chat is known: never stored, never knocked, not even counted (its activity is not ours to see).
+        if (writeOnly.has(record.chatJid)) return;
         skippedCount += 1;
         recordKnock(record);
-      }, config.speech || {}),
+      }, config.speech || {}, refreshAllowlist),
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });
@@ -363,7 +386,6 @@ async function main() {
       type: 'heartbeat',
       chats: config.chats.length,
       skippedNonAllowlisted: skippedCount,
-      skippedWriteOnly,
     });
   }, HEARTBEAT_MS);
 

@@ -83,6 +83,15 @@ export function loadConfig() {
       throw new Error(`WhatsApp assistant config at ${file}: chats contains "${jid}" twice.`);
     }
     seen.add(jid);
+    // Both flags are booleans when present: a misspelled value ("false", 0, "no") must fail loudly,
+    // never fall back to a default — a fallback to readable would leak a write-only chat.
+    for (const flag of ['canPost', 'canRead']) {
+      if (entry[flag] !== undefined && typeof entry[flag] !== 'boolean') {
+        throw new Error(
+          `WhatsApp assistant config at ${file}: chats[${index}] ("${jid}") has ${flag}: ${JSON.stringify(entry[flag])}; it must be true or false.`,
+        );
+      }
+    }
     const canPost = entry.canPost === true;
     // canRead defaults to true. canRead:false makes the chat write-only: its incoming messages are
     // never stored and no read tool returns them, but it can still be posted to (e.g. an operator's
