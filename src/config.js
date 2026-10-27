@@ -83,10 +83,21 @@ export function loadConfig() {
       throw new Error(`WhatsApp assistant config at ${file}: chats contains "${jid}" twice.`);
     }
     seen.add(jid);
+    const canPost = entry.canPost === true;
+    // canRead defaults to true. canRead:false makes the chat write-only: its incoming messages are
+    // never stored and no read tool returns them, but it can still be posted to (e.g. an operator's
+    // alert channel that the agent must not read).
+    const canRead = entry.canRead !== false;
+    if (!canRead && !canPost) {
+      throw new Error(
+        `WhatsApp assistant config at ${file}: chats[${index}] ("${jid}") has canRead:false and canPost:false, so it can neither be read nor posted to. Remove it or allow one of them.`,
+      );
+    }
     return {
       jid,
       name: typeof entry.name === 'string' && entry.name.trim() !== '' ? entry.name.trim() : jid,
-      canPost: entry.canPost === true,
+      canPost,
+      canRead,
     };
   });
 

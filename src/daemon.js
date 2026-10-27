@@ -49,6 +49,14 @@ export function recordKnock(record) {
   );
 }
 
+/** The stored set (readable chats) and the write-only set (canRead:false) of an allowlist config. */
+export function splitAllowlist(config) {
+  return {
+    readable: new Set(config.chats.filter((c) => c.canRead !== false).map((c) => c.jid)),
+    writeOnly: new Set(config.chats.filter((c) => c.canRead === false).map((c) => c.jid)),
+  };
+}
+
 export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}) {
   return (record, raw) => {
     if (!allowlist.has(record.chatJid)) {
@@ -278,8 +286,9 @@ async function main() {
     console.log('WA_DISCOVER=1: running with an empty allowlist to catalog chats.');
   }
 
-  const allowlist = new Set(config.chats.map((c) => c.jid));
-  console.log(`Loaded ${config.chats.length} allowlisted chat(s) from ${configPath()}`);
+  // Only readable chats are stored; a write-only chat (canRead:false) is allowlisted for sending only.
+  const { readable: allowlist, writeOnly } = splitAllowlist(config);
+  console.log(`Loaded ${config.chats.length} allowlisted chat(s) (${writeOnly.size} write-only) from ${configPath()}`);
 
   const handleLoggedOut = (err) => {
     console.error(`WhatsApp connection failed: ${err.message}`);
@@ -291,13 +300,19 @@ async function main() {
   // deliberately never written to inbox.jsonl -- the allowlist is the blast-radius
   // control, and "not stored" must mean not stored, not "stored somewhere quieter".
   let skippedCount = 0;
+  // Messages seen in a write-only chat: counted, never stored, never knocked (the chat is known).
+  let skippedWriteOnly = 0;
 
   const outboxStartOffset = snapshotOutboxOffset();
   let connection;
   try {
     connection = await connect({
       reconnect: true,
-      onMessage: makeOnMessage(allowlist, (record) => { skippedCount += 1; recordKnock(record); }, config.speech || {}),
+      onMessage: makeOnMessage(allowlist, (record) => {
+        if (writeOnly.has(record.chatJid)) { skippedWriteOnly += 1; return; }
+        skippedCount += 1;
+        recordKnock(record);
+      }, config.speech || {}),
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });
@@ -348,6 +363,7 @@ async function main() {
       type: 'heartbeat',
       chats: config.chats.length,
       skippedNonAllowlisted: skippedCount,
+      skippedWriteOnly,
     });
   }, HEARTBEAT_MS);
 
