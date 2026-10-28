@@ -78,7 +78,18 @@ cp wa-mcp.config.example.json ~/.whatsapp-assistant/wa-mcp.config.json
 
 Edit it and replace the placeholder jids with real ones -- individual chats end in
 `@s.whatsapp.net`, groups end in `@g.us`. `canPost` defaults to (and should stay)
-`false` until you mean it. Both `wa-daemon` and `wa-mcp` refuse to do anything useful
+`false` until you mean it.
+
+`canRead` defaults to `true`. Set `"canRead": false` to make a chat **write-only**: the agent
+can post to it but its messages are never stored in `inbox.jsonl`, never downloaded, and no read
+tool returns them (`read_chat_messages` refuses it, `poll_chats` and `list_chats` leave it out).
+Use it for a channel the agent must report into but must not read, such as an operator's alert
+group shared with other conversations. Both flags must be real booleans when present (`"false"` as a
+string is refused), and a chat with both false is refused at startup. The daemon picks up a
+`canRead` change in the config without a restart (it re-checks the file on the next incoming
+message); a change to `canPost` takes effect for sending after a restart. A reply that quotes a
+message from a chat the agent may not read keeps the quoted message's id but not its text
+(`replyToTextWithheld: true`). Both `wa-daemon` and `wa-mcp` refuse to do anything useful
 with an empty or missing allowlist.
 
 ### 3. Run the daemon

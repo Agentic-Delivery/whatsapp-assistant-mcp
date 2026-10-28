@@ -67,7 +67,8 @@ export async function listChats() {
       jid: c.jid,
       name: c.name,
       canPost: c.canPost,
-      recentMessageCount: counts.get(c.jid) || 0,
+      canRead: c.canRead,
+      recentMessageCount: c.canRead ? counts.get(c.jid) || 0 : 0,
     })),
   };
 }
@@ -75,8 +76,12 @@ export async function listChats() {
 /** read_chat_messages: last `limit` inbox.jsonl lines for one allowlisted chat. */
 export async function readChatMessages({ jid, limit = 30 }) {
   const config = loadConfig();
-  if (!findChat(config, jid)) {
+  const chat = findChat(config, jid);
+  if (!chat) {
     throw new Error(`"${jid}" is not in the allowlist. Add it to ${configPath()} first.`);
+  }
+  if (!chat.canRead) {
+    throw new Error(`"${jid}" (${chat.name}) is write-only (canRead:false in ${configPath()}): it can be posted to but never read.`);
   }
   return { jid, messages: readMessages(jid, limit) };
 }
@@ -271,10 +276,14 @@ export async function pollChats() {
   const { entries, newOffset } = readNewLines(inboxPath(), cursor.offset);
   writeCursor({ offset: newOffset });
 
+  // Defence in depth: the daemon never stores a write-only chat, but lines written before a chat
+  // was made write-only may still be in the inbox, so they are filtered here too.
+  const writeOnly = new Set(loadConfig().chats.filter((c) => !c.canRead).map((c) => c.jid));
   const grouped = {};
   for (const entry of entries) {
     // Protocol bookkeeping (send-acks, media notes) is skipped; a voice-note transcript is content, so it stays.
     if (entry?.type && entry.type !== 'transcript') continue;
+    if (writeOnly.has(entry.chatJid)) continue;
     const jid = entry.chatJid || 'unknown';
     if (!grouped[jid]) grouped[jid] = [];
     grouped[jid].push(entry);
