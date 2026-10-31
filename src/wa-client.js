@@ -526,8 +526,19 @@ export function listChats() {
 /** A mention is a person's jid; the text must carry "@<number>" for it to show as a tag. */
 const MENTION_JID = /^\d{5,20}@(s\.whatsapp\.net|lid)$/;
 
-/** Sends a text message through the live connection, tagging `mentions`. Throws if nothing is connected. */
-export async function sendText(jid, text, mentions = []) {
+/**
+ * The minimal WAMessage Baileys needs to send a quoted reply: the quoted message's key and a
+ * text body. `quote` is the outbox shape {msgId, participant?, fromMe?, text?}; the text only
+ * fills the preview bubble, the key is what ties the reply to the original.
+ */
+export function quotedMessage(jid, quote) {
+  if (!quote || typeof quote.msgId !== 'string' || !quote.msgId) throw new Error('invalid quote: expected {msgId, participant?, fromMe?, text?}');
+  const key = { remoteJid: jid, id: quote.msgId, fromMe: !!quote.fromMe, ...(quote.participant ? { participant: quote.participant } : {}) };
+  return { key, message: { conversation: quote.text ?? '' } };
+}
+
+/** Sends a text message through the live connection, tagging `mentions`, as a quoted reply when `quote` is given. Throws if nothing is connected. */
+export async function sendText(jid, text, mentions = [], quote = null) {
   if (!sockRef) {
     throw new Error('No active WhatsApp connection. sendText() must run inside the daemon process.');
   }
@@ -535,8 +546,17 @@ export async function sendText(jid, text, mentions = []) {
   if (bad.length) throw new Error(`invalid mention jid: ${bad.join(', ')}`);
   const missing = mentions.filter((m) => !new RegExp(`@${m.split('@')[0]}(?!\\d)`).test(text));
   if (missing.length) throw new Error(`text lacks @<number> for mention: ${missing.join(', ')}`);
-  const result = await sockRef.sendMessage(jid, mentions.length ? { text, mentions } : { text });
+  const content = mentions.length ? { text, mentions } : { text };
+  const result = quote
+    ? await sockRef.sendMessage(jid, content, { quoted: quotedMessage(jid, quote) })
+    : await sockRef.sendMessage(jid, content);
   return result?.key?.id || null;
+}
+
+/** Sends a chat presence ('composing', 'paused', ...) to one chat. Daemon-only. */
+export async function sendPresence(jid, state) {
+  if (!sockRef) throw new Error('No active WhatsApp connection. sendPresence() must run inside the daemon process.');
+  await sockRef.sendPresenceUpdate(state, jid);
 }
 
 /** Sends a document from a local file path. Caption is optional. Same one-connection
@@ -798,7 +818,8 @@ export async function connect(opts = {}) {
         } else if (connection === 'close') {
           const statusCode = lastDisconnect?.error?.output?.statusCode;
           const loggedOut = statusCode === DisconnectReason?.loggedOut;
-          onConnection(update);
+          // The caller learns why it closed: a logout is final (no reconnect follows), anything else retries.
+          onConnection(loggedOut ? { ...update, loggedOut: true } : update);
 
           if (loggedOut) {
             const err = new Error('WhatsApp session logged out. Delete the auth directory and run wa-pair again.');

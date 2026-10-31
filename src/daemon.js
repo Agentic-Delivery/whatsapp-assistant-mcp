@@ -8,12 +8,15 @@
 //     actual send, and append a matching ack back into inbox.jsonl
 //   - write a heartbeat line to daemon.log every 30s so liveness can be checked
 //     without touching the WhatsApp connection itself
+//   - opt-in (WA_CHANNEL_INBOX): also append each inbound human message as a channel
+//     line v1 to a shared, platform-neutral inbox, plus adapter events (connected,
+//     disconnected, ...); WA_RECEIPT_EMOJI adds a "seen" reaction before that line
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
 import { queueTranscription } from './speech.js';
-import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -25,6 +28,114 @@ function logDaemon(record) {
   } catch {
     // Best-effort logging; a log write failure must never crash the daemon.
   }
+}
+
+// ---------------------------------------------------------------------------
+// Channel line v1 (build contract v1, docs/design/channel-interface.md §4.2 in vd-server).
+// Opt-in: with WA_CHANNEL_INBOX unset nothing below writes anything. The channel inbox is
+// shared with other adapters, so each line is ONE appendFileSync (one write() on an O_APPEND
+// descriptor) and lines from two adapters never interleave.
+
+const RECEIPT_TIMEOUT_MS = 3000;
+
+/** The channel settings from the environment, or null when channel v1 is off. */
+export function channelFromEnv(env = process.env) {
+  if (!env.WA_CHANNEL_INBOX) return null;
+  return { inbox: env.WA_CHANNEL_INBOX, emoji: env.WA_RECEIPT_EMOJI || null };
+}
+
+function appendChannelLine(inbox, line) {
+  try {
+    fs.mkdirSync(path.dirname(inbox), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(inbox, JSON.stringify(line) + '\n', { mode: 0o600 });
+  } catch (err) {
+    // The native inbox already holds the record; a channel write failure is logged, never thrown.
+    logDaemon({ ts: Date.now(), type: 'error', scope: 'channel', message: String(err?.message || err) });
+  }
+}
+
+/** An adapter event line (connected, disconnected, reconnecting, auth-failed). No-op when channel v1 is off. */
+export function writeChannelAdapterEvent(event, detail = null, channel = channelFromEnv()) {
+  if (!channel) return;
+  const now = new Date().toISOString();
+  appendChannelLine(channel.inbox, { v: 1, kind: 'adapter', platform: 'wa', ts: now, ingestedAt: now, event, detail });
+}
+
+/**
+ * The adapter events one connection update means, as [event, detail] pairs. The daemon always
+ * reconnects after a close that is not a logout, so such a close is followed by 'reconnecting';
+ * a logout is final.
+ */
+export function adapterEventsFor(update) {
+  if (update.connection === 'open') return [['connected', null]];
+  if (update.connection !== 'close') return [];
+  if (update.loggedOut) return [['auth-failed', 'logged out: re-pair needed']];
+  const e = update.lastDisconnect?.error;
+  const code = e?.output?.statusCode;
+  const detail = [code ? `status ${code}` : null, e?.message || null].filter(Boolean).join(': ') || null;
+  return [['disconnected', detail], ['reconnecting', null]];
+}
+
+/**
+ * True when a native record is something a person wrote that v1 carries: not ours, has text,
+ * and not a reaction, an edit or an undecryptable edit (v1 writes none of those).
+ */
+export function isChannelMessage(record) {
+  return !record.fromMe && !record.type && !record.editOfMsgId && typeof record.text === 'string' && record.text.trim() !== '' && !!record.msgId;
+}
+
+/** When the person sent it, from WhatsApp's own timestamp (seconds; a number, string or Long). */
+function sentAtIso(raw, fallbackMs) {
+  const t = raw?.messageTimestamp;
+  const secs = typeof t === 'object' && t !== null && typeof t.toNumber === 'function' ? t.toNumber() : Number(t);
+  return new Date(Number.isFinite(secs) && secs > 0 ? secs * 1000 : fallbackMs).toISOString();
+}
+
+/** The "seen" reaction, bounded: resolves 'placed' or 'failed', never rejects, never waits past timeoutMs. */
+function placeReceipt(channel, record, raw) {
+  const react = channel.react || sendReaction;
+  // In a group the reaction must name the message's sender; in a DM there is no participant.
+  const participant = raw?.key?.participant || (record.chatJid.endsWith('@g.us') ? record.senderJid : undefined);
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve('failed'), channel.receiptTimeoutMs ?? RECEIPT_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  const attempt = Promise.resolve()
+    .then(() => react(record.chatJid, { id: record.msgId, fromMe: false, participant }, channel.emoji))
+    .then(() => 'placed', () => 'failed');
+  return Promise.race([attempt, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Writes the one v1 line for an inbound message: the receipt first (when on), then the line,
+ * which records whether the receipt landed. Never rejects: a failed or slow receipt never
+ * blocks or drops the line. `text` overrides the record's (a voice note's transcript).
+ */
+export async function writeChannelMessage(channel, record, raw, { text, attachments = [] } = {}) {
+  let receipt = null;
+  if (channel.emoji) {
+    try { receipt = await placeReceipt(channel, record, raw); } catch { receipt = 'failed'; }
+  }
+  const senderJid = record.senderJid || record.chatJid;
+  appendChannelLine(channel.inbox, {
+    v: 1,
+    kind: 'message',
+    platform: 'wa',
+    ts: sentAtIso(raw, record.ts),
+    ingestedAt: new Date().toISOString(),
+    chatId: `wa:${record.chatJid}`,
+    spaceId: null,
+    threadId: null,
+    msgId: record.msgId,
+    senderId: `wa:${senderJid}`,
+    senderName: record.senderName || null,
+    fromMe: false,
+    text: text || record.text,
+    replyToMsgId: record.replyToMsgId || null,
+    attachments,
+    receipt,
+  });
 }
 
 /**
@@ -57,7 +168,7 @@ export function splitAllowlist(config) {
   };
 }
 
-export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, beforeEach = () => {}) {
+export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, beforeEach = () => {}, channel = channelFromEnv()) {
   return (record, raw) => {
     beforeEach();
     if (!allowlist.has(record.chatJid)) {
@@ -70,13 +181,24 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
       record = { ...record, replyToText: null, replyToTextWithheld: true };
     }
     appendInbox(record);
-    if (!hasSavableMedia(raw)) return Promise.resolve();
+    // Channel v1: exactly one line per message. A message with media waits for its download
+    // (and a voice note for its transcript) so the line carries the attachment and the words;
+    // a skipped or failed download still writes the line, without the attachment.
+    let channelDone = !channel || !isChannelMessage(record);
+    const toChannel = (extra) => {
+      if (channelDone) return undefined;
+      channelDone = true;
+      return writeChannelMessage(channel, record, raw, extra);
+    };
+    if (!hasSavableMedia(raw)) return Promise.resolve(toChannel());
+    let attachments = [];
     return downloadDocument(raw, path.join(waHome(), 'downloads'))
       .then((r) => {
         const note = r.path
           ? { ...record, type: 'media-saved', mediaPath: r.path, bytes: r.bytes, kind: r.kind, mimetype: r.mimetype }
           : { ...record, type: 'media-skipped', reason: r.skipped };
         appendInbox(note);
+        if (r.path) attachments = [{ name: r.filename, mime: r.mimetype, bytes: r.bytes, path: r.path }];
         // A saved voice note becomes text when a transcribe command is configured: the transcript is appended to
         // the inbox as its own record (so any agent can read what was said) and written next to the audio.
         // r.voiceNote is set by the download from the message type itself, never from a sender-chosen file name.
@@ -90,12 +212,18 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
                 rec.warning = `transcript file not written: ${err?.message || err}`;
               }
               appendInbox(rec);
+              return toChannel({ text: text.trim(), attachments });
             })
-            .catch((err) => appendInbox({ ...record, type: 'transcript-error', error: String(err?.message || err), mediaPath: r.path }));
+            .catch((err) => {
+              appendInbox({ ...record, type: 'transcript-error', error: String(err?.message || err), mediaPath: r.path });
+              return toChannel({ attachments });
+            });
         }
+        return toChannel({ attachments });
       })
       .catch((err) => {
         appendInbox({ ...record, type: 'media-error', error: String(err?.message || err) });
+        return toChannel({ attachments });
       });
   };
 }
@@ -108,7 +236,59 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
  * carrying the same nonce so the waiting MCP tool call can pick it up.
  */
 /** The one list of outbox command types the watcher hands to handleSendCommand. A type handled there but missing here is silently skipped. */
-export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice', 'react', 'delete']);
+export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice', 'react', 'delete', 'typing']);
+
+// Typing indicator ({type:'typing', jid, on, nonce}): WhatsApp drops 'composing' after a few
+// seconds, so it is refreshed every 10 s until on:false, a message sent to that chat, or 180 s,
+// then 'paused'. One entry per jid at most; the timers are unref'd so they never hold the
+// process open, and stopping always clears both.
+const TYPING_REFRESH_MS = 10000;
+const TYPING_MAX_MS = 180000;
+const typing = new Map(); // jid -> { refresh, expire }
+/** Commands that put a message in the chat, and so end the typing indicator there. */
+const MESSAGE_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice']);
+
+/** The jids currently showing typing (for tests and diagnosis). */
+export function typingJids() {
+  return [...typing.keys()];
+}
+
+function clearTyping(jid) {
+  const t = typing.get(jid);
+  if (!t) return false;
+  clearInterval(t.refresh);
+  clearTimeout(t.expire);
+  typing.delete(jid);
+  return true;
+}
+
+/** Ends typing in one chat and sends 'paused'. Never throws; a no-op when that chat is not typing. */
+export async function stopTyping(jid) {
+  if (!clearTyping(jid)) return;
+  try {
+    await sendPresence(jid, 'paused');
+  } catch (err) {
+    logDaemon({ ts: Date.now(), type: 'error', scope: 'typing', message: String(err?.message || err) });
+  }
+}
+
+/** Starts (or restarts) typing in one chat. Throws when the first 'composing' cannot be sent. */
+export async function startTyping(jid) {
+  clearTyping(jid);
+  await sendPresence(jid, 'composing');
+  const refresh = setInterval(() => {
+    sendPresence(jid, 'composing').catch((err) => logDaemon({ ts: Date.now(), type: 'error', scope: 'typing', message: String(err?.message || err) }));
+  }, TYPING_REFRESH_MS);
+  const expire = setTimeout(() => { stopTyping(jid); }, TYPING_MAX_MS);
+  refresh.unref?.();
+  expire.unref?.();
+  typing.set(jid, { refresh, expire });
+}
+
+/** Clears every typing timer without sending anything (shutdown). */
+export function clearAllTyping() {
+  for (const jid of [...typing.keys()]) clearTyping(jid);
+}
 
 export async function handleSendCommand(cmd, config) {
   const { jid, text, nonce } = cmd;
@@ -127,7 +307,14 @@ export async function handleSendCommand(cmd, config) {
       // Applies to text messages AND document captions alike.
       const SIG = process.env.WA_AGENT_SIG || "\u{1F916} ";
       let msgId;
-      if (cmd.type === 'react') {
+      // A message to a chat ends the typing indicator there; not awaited, so it never delays the send.
+      if (MESSAGE_TYPES.has(cmd.type)) stopTyping(jid);
+      if (cmd.type === 'typing') {
+        // {type:'typing', jid, nonce, on}: on:true shows "typing…" until on:false, a send, or 180 s.
+        if (cmd.on) await startTyping(jid);
+        else await stopTyping(jid);
+        ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId: null, typing: !!cmd.on };
+      } else if (cmd.type === 'react') {
         // {type:'react', jid, nonce, msgId, emoji, fromMe?, participant?} — an empty emoji removes our reaction.
         if (!cmd.msgId) throw new Error('react needs msgId');
         msgId = await sendReaction(jid, { id: cmd.msgId, fromMe: !!cmd.fromMe, participant: cmd.participant }, cmd.emoji ?? '');
@@ -199,7 +386,8 @@ export async function handleSendCommand(cmd, config) {
       } else {
         const signed = text.startsWith(SIG) ? text : SIG + text;
         if (cmd.mentions !== undefined && !Array.isArray(cmd.mentions)) throw new Error('invalid mentions: expected an array of jids');
-        msgId = await sendText(jid, signed, cmd.mentions ?? []);
+        // quote: {msgId, participant?, fromMe?, text?} sends it as a reply to that message.
+        msgId = await sendText(jid, signed, cmd.mentions ?? [], cmd.quote ?? null);
         const echo = await awaitEcho(msgId, cmd.echoTimeoutMs ?? 15000);
         const echoed = echo?.message?.conversation ?? echo?.message?.extendedTextMessage?.text ?? null;
         ack = echo
@@ -339,6 +527,7 @@ async function main() {
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });
+          for (const [event, detail] of adapterEventsFor(update)) writeChannelAdapterEvent(event, detail);
           // The identities a mention must match — logged so a missed @-mention is
           // diagnosable from the log (is the LID identity populated live?).
           if (update.connection === 'open') logDaemon({ ts: Date.now(), type: 'identity', selves: selfIdentities() });
@@ -349,6 +538,8 @@ async function main() {
   } catch (err) {
     if (!err.loggedOut) {
       console.error(`WhatsApp connection failed: ${err.message}`);
+    } else {
+      writeChannelAdapterEvent('auth-failed', err.message);
     }
     process.exit(1);
     return;
@@ -392,6 +583,7 @@ async function main() {
   const shutdown = () => {
     clearInterval(heartbeat);
     clearInterval(retentionTimer);
+    clearAllTyping();
     stopOutboxWatcher();
     process.exit(0);
   };
