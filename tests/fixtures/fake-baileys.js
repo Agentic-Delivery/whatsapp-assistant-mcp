@@ -16,12 +16,13 @@ export const createdSockets = [];
 export default function makeWASocket(_config) {
   const ev = new EventEmitter();
   const sent = [];
+  const presence = [];
   const sock = {
     ev,
     user: { id: 'fake-self@s.whatsapp.net' },
-    sendMessage: async (jid, content) => {
+    sendMessage: async (jid, content, options) => {
       const msgId = `fake-msg-${sent.length + 1}`;
-      sent.push({ jid, content, msgId });
+      sent.push({ jid, content, msgId, options });
       // Mirror WhatsApp: every send is reflected back as a fromMe upsert. __echoMode
       // lets a test model a faithful echo, a NAMELESS document echo (the defect
       // class), or no echo at all.
@@ -40,8 +41,11 @@ export default function makeWASocket(_config) {
       }
       return { key: { id: msgId } };
     },
+    // Chat presence (typing indicator): recorded, never sent anywhere.
+    sendPresenceUpdate: async (state, jid) => { presence.push({ state, jid }); },
     requestPairingCode: async (_phoneNumber) => '123-456',
     __sent: sent,
+    __presence: presence,
   };
   createdSockets.push(sock);
   // Real Baileys reaches "open" asynchronously after a handshake; emitting it on
