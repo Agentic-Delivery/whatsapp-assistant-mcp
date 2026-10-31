@@ -244,8 +244,8 @@ message (in a group, `participant` is the quoted message's sender; `text` only f
 preview). The ack is the same as for any text.
 
 `typing` with `on:true` shows "typing…" in the chat and keeps it up (refreshed every 10 s)
-until `on:false`, any message sent to that chat, or 180 s, whichever comes first; then the
-chat shows paused. It acks `ok:true, typing:<on>` and obeys the allowlist and `canPost`.
+until `on:false` or 600 s, then the chat shows paused. It is meant to cover a whole turn: a
+message sent to that chat pauses it just before the message and resumes it afterwards. It acks `ok:true, typing:<on>` and obeys the allowlist and `canPost`.
 
 `delete` can only remove a message this account sent; it never touches anyone else's.
 Its ack (`ok:true, deleted: <msgId>`) means the revoke was sent, not that the id
@@ -386,8 +386,8 @@ unless set; the native `inbox.jsonl` is unchanged either way.
 
 | Variable | Effect |
 |---|---|
-| `WA_CHANNEL_INBOX=<path>` | Appends one v1 line per message from a readable allowlisted chat that is not ours and has text (a voice note's transcript counts): `chatId`/`senderId` as `wa:<jid>`, `msgId`, `ts` (when sent), `ingestedAt`, `replyToMsgId`, `attachments` (`[{name, mime, bytes, path}]` once saved) and `receipt`. Reactions, edits, deletions, our own messages and acks are not written. Connection changes are written as `kind:"adapter"` lines with `event` `connected`, `disconnected`, `reconnecting` or `auth-failed`. The directory is created 0700, the file 0600; each line is one append, so several adapters can share the file. |
-| `WA_RECEIPT_EMOJI=<emoji>` | With `WA_CHANNEL_INBOX`: reacts with this emoji on each such message before its line is written (waiting at most 3 s), and records `receipt: "placed"` or `"failed"` on the line (`null` when unset). A failed receipt never holds back the line. |
+| `WA_CHANNEL_INBOX=<path>` | Appends one v1 line per message from a readable allowlisted chat that is not ours and has text (a voice note's transcript counts): `chatId`/`senderId` as `wa:<jid>`, `msgId`, `ts` (when sent), `ingestedAt`, `replyToMsgId`, `attachments` (`[{name, mime, bytes, path}]` once saved) and `receipt`. A reaction by a person is written as `kind:"reaction"` (`msgId` of the reaction, `targetMsgId`, `emoji`, empty when removed) and an edit as `kind:"edit"` (`targetMsgId`, `text`), both with `chatId`, `senderId`, `senderName`, `ts`, `fromMe` and no receipt. Deletions, our own messages and acks are not written. Connection changes are written as `kind:"adapter"` lines with `event` `connected`, `disconnected`, `reconnecting` or `auth-failed`. The directory is created 0700, the file 0600; each line is one append, so several adapters can share the file. |
+| `WA_RECEIPT_EMOJI=<emoji>` | With `WA_CHANNEL_INBOX`: reacts with this emoji on each such message as soon as it arrives, before any download or transcription, and records (waiting at most 3 s from arrival) `receipt: "placed"` or `"failed"` on the line (`null` when unset). A failed receipt never holds back the line. |
 
 A message with media is written once its download is done, and a voice note once its
 transcript is ready (or has failed), so each message is one line.

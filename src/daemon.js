@@ -77,8 +77,8 @@ export function adapterEventsFor(update) {
 }
 
 /**
- * True when a native record is something a person wrote that v1 carries: not ours, has text,
- * and not a reaction, an edit or an undecryptable edit (v1 writes none of those).
+ * True when a native record is a message a person wrote: not ours, has text, and not a
+ * reaction or an edit (those get their own line kinds, see channelEventLine).
  */
 export function isChannelMessage(record) {
   return !record.fromMe && !record.type && !record.editOfMsgId && typeof record.text === 'string' && record.text.trim() !== '' && !!record.msgId;
@@ -92,7 +92,7 @@ function sentAtIso(raw, fallbackMs) {
 }
 
 /** The "seen" reaction, bounded: resolves 'placed' or 'failed', never rejects, never waits past timeoutMs. */
-function placeReceipt(channel, record, raw) {
+export function placeReceipt(channel, record, raw) {
   const react = channel.react || sendReaction;
   // In a group the reaction must name the message's sender; in a DM there is no participant.
   const participant = raw?.key?.participant || (record.chatJid.endsWith('@g.us') ? record.senderJid : undefined);
@@ -108,14 +108,15 @@ function placeReceipt(channel, record, raw) {
 }
 
 /**
- * Writes the one v1 line for an inbound message: the receipt first (when on), then the line,
- * which records whether the receipt landed. Never rejects: a failed or slow receipt never
- * blocks or drops the line. `text` overrides the record's (a voice note's transcript).
+ * Writes the one v1 line for an inbound message once its record is complete. `receipt` is the
+ * promise of the receipt attempt started when the message arrived (null when receipts are off);
+ * the line records how it ended. Never rejects: a failed or slow receipt never blocks or drops
+ * the line. `text` overrides the record's (a voice note's transcript).
  */
-export async function writeChannelMessage(channel, record, raw, { text, attachments = [] } = {}) {
+export async function writeChannelMessage(channel, record, raw, { text, attachments = [], receipt: pending = null } = {}) {
   let receipt = null;
-  if (channel.emoji) {
-    try { receipt = await placeReceipt(channel, record, raw); } catch { receipt = 'failed'; }
+  if (pending) {
+    try { receipt = await pending; } catch { receipt = 'failed'; }
   }
   const senderJid = record.senderJid || record.chatJid;
   appendChannelLine(channel.inbox, {
@@ -136,6 +137,45 @@ export async function writeChannelMessage(channel, record, raw, { text, attachme
     attachments,
     receipt,
   });
+}
+
+/**
+ * The v1 line for a reaction or an edit by a person, or null when the record is neither. Both
+ * are delivered so a 👍 or a corrected sentence is seen, but they carry no receipt. A removed
+ * reaction has emoji ''. An edit WhatsApp sent encrypted (secretEncryptedMessage) is still an
+ * edit: its text says it cannot be read, so the factory can ask for it again.
+ */
+export function channelEventLine(record, raw) {
+  if (record.fromMe) return null;
+  let kind;
+  let fields;
+  if (record.type === 'reaction' && record.reaction) {
+    kind = 'reaction';
+    fields = { msgId: record.msgId || null, targetMsgId: record.reaction.targetMsgId, emoji: record.reaction.emoji };
+  } else if (record.editOfMsgId) {
+    kind = 'edit';
+    fields = { msgId: record.msgId || null, targetMsgId: record.editOfMsgId, text: record.text };
+  } else if (record.type === 'secret-encrypted' && record.targetMsgId) {
+    kind = 'edit';
+    fields = { msgId: record.msgId || null, targetMsgId: record.targetMsgId, text: record.text };
+  } else {
+    return null;
+  }
+  const senderJid = record.senderJid || record.chatJid;
+  return {
+    v: 1,
+    kind,
+    platform: 'wa',
+    ts: sentAtIso(raw, record.ts),
+    ingestedAt: new Date().toISOString(),
+    chatId: `wa:${record.chatJid}`,
+    spaceId: null,
+    threadId: null,
+    senderId: `wa:${senderJid}`,
+    senderName: record.senderName || null,
+    fromMe: false,
+    ...fields,
+  };
 }
 
 /**
@@ -181,14 +221,21 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
       record = { ...record, replyToText: null, replyToTextWithheld: true };
     }
     appendInbox(record);
-    // Channel v1: exactly one line per message. A message with media waits for its download
-    // (and a voice note for its transcript) so the line carries the attachment and the words;
-    // a skipped or failed download still writes the line, without the attachment.
+    // Channel v1, reactions and edits: one line each, at once, no receipt.
+    if (channel) {
+      const event = channelEventLine(record, raw);
+      if (event) appendChannelLine(channel.inbox, event);
+    }
+    // Channel v1, messages: exactly one line per message. The receipt goes out NOW, on arrival,
+    // so "seen" never waits for a download or a transcription. The line waits for the record to
+    // be complete: a message with media for its download (the attachment), a voice note for its
+    // transcript (the words); a skipped or failed download still writes the line, without it.
     let channelDone = !channel || !isChannelMessage(record);
-    const toChannel = (extra) => {
+    const receipt = !channelDone && channel.emoji ? placeReceipt(channel, record, raw) : null;
+    const toChannel = (extra = {}) => {
       if (channelDone) return undefined;
       channelDone = true;
-      return writeChannelMessage(channel, record, raw, extra);
+      return writeChannelMessage(channel, record, raw, { ...extra, receipt });
     };
     if (!hasSavableMedia(raw)) return Promise.resolve(toChannel());
     let attachments = [];
@@ -239,13 +286,14 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
 export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice', 'react', 'delete', 'typing']);
 
 // Typing indicator ({type:'typing', jid, on, nonce}): WhatsApp drops 'composing' after a few
-// seconds, so it is refreshed every 10 s until on:false, a message sent to that chat, or 180 s,
-// then 'paused'. One entry per jid at most; the timers are unref'd so they never hold the
-// process open, and stopping always clears both.
+// seconds, so it is refreshed every 10 s until on:false or 600 s, then 'paused'. It covers the
+// whole turn: a message sent to that chat pauses it just before the message and resumes it after.
+// One entry per jid at most; the timers are unref'd so they never hold the process open, and
+// stopping always clears both. (600 s: the measured p90 turn is 246 s idle, 387 s busy.)
 const TYPING_REFRESH_MS = 10000;
-const TYPING_MAX_MS = 180000;
-const typing = new Map(); // jid -> { refresh, expire }
-/** Commands that put a message in the chat, and so end the typing indicator there. */
+const TYPING_MAX_MS = 600000;
+const typing = new Map(); // jid -> { refresh, expire, paused }
+/** Commands that put a message in the chat, and so pause the typing indicator there around the send. */
 const MESSAGE_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice']);
 
 /** The jids currently showing typing (for tests and diagnosis). */
@@ -276,13 +324,35 @@ export async function stopTyping(jid) {
 export async function startTyping(jid) {
   clearTyping(jid);
   await sendPresence(jid, 'composing');
-  const refresh = setInterval(() => {
+  const entry = { paused: false };
+  entry.refresh = setInterval(() => {
+    if (entry.paused) return;
     sendPresence(jid, 'composing').catch((err) => logDaemon({ ts: Date.now(), type: 'error', scope: 'typing', message: String(err?.message || err) }));
   }, TYPING_REFRESH_MS);
-  const expire = setTimeout(() => { stopTyping(jid); }, TYPING_MAX_MS);
-  refresh.unref?.();
-  expire.unref?.();
-  typing.set(jid, { refresh, expire });
+  entry.expire = setTimeout(() => { stopTyping(jid); }, TYPING_MAX_MS);
+  entry.refresh.unref?.();
+  entry.expire.unref?.();
+  typing.set(jid, entry);
+}
+
+/** Before a message to a typing chat: 'paused', so "typing…" does not sit on top of it. Returns the entry to resume, or null. */
+async function pauseTypingForSend(jid) {
+  const entry = typing.get(jid);
+  if (!entry) return null;
+  entry.paused = true;
+  try {
+    await sendPresence(jid, 'paused');
+  } catch (err) {
+    logDaemon({ ts: Date.now(), type: 'error', scope: 'typing', message: String(err?.message || err) });
+  }
+  return entry;
+}
+
+/** After the message: 'composing' again, unless typing was stopped or restarted meanwhile. */
+function resumeTypingAfterSend(jid, entry) {
+  if (!entry || typing.get(jid) !== entry) return;
+  entry.paused = false;
+  sendPresence(jid, 'composing').catch((err) => logDaemon({ ts: Date.now(), type: 'error', scope: 'typing', message: String(err?.message || err) }));
 }
 
 /** Clears every typing timer without sending anything (shutdown). */
@@ -293,6 +363,7 @@ export function clearAllTyping() {
 export async function handleSendCommand(cmd, config) {
   const { jid, text, nonce } = cmd;
   let ack;
+  let typingHeld = null;
   const chat = findChat(config, jid);
   if (!chat) {
     ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: false, error: `jid not in allowlist: ${jid}` };
@@ -307,10 +378,10 @@ export async function handleSendCommand(cmd, config) {
       // Applies to text messages AND document captions alike.
       const SIG = process.env.WA_AGENT_SIG || "\u{1F916} ";
       let msgId;
-      // A message to a chat ends the typing indicator there; not awaited, so it never delays the send.
-      if (MESSAGE_TYPES.has(cmd.type)) stopTyping(jid);
+      // A message to a typing chat pauses the indicator just before it; it resumes after the send.
+      if (MESSAGE_TYPES.has(cmd.type)) typingHeld = await pauseTypingForSend(jid);
       if (cmd.type === 'typing') {
-        // {type:'typing', jid, nonce, on}: on:true shows "typing…" until on:false, a send, or 180 s.
+        // {type:'typing', jid, nonce, on}: on:true shows "typing…" until on:false or 600 s.
         if (cmd.on) await startTyping(jid);
         else await stopTyping(jid);
         ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId: null, typing: !!cmd.on };
@@ -397,6 +468,7 @@ export async function handleSendCommand(cmd, config) {
     } catch (err) {
       ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: false, error: String(err?.message || err) };
     }
+    resumeTypingAfterSend(jid, typingHeld);
   }
   appendInbox(ack);
 }

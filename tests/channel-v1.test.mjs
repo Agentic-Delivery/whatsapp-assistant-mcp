@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.js';
 import { connect, extractMessageRecords } from '../src/wa-client.js';
 import {
-  adapterEventsFor, channelFromEnv, handleSendCommand, makeOnMessage, OUTBOX_TYPES,
+  adapterEventsFor, channelFromEnv, clearAllTyping, handleSendCommand, makeOnMessage, OUTBOX_TYPES,
   typingJids, writeChannelAdapterEvent,
 } from '../src/daemon.js';
 
@@ -33,6 +33,7 @@ const homes = [];
 after(() => { for (const h of homes) fs.rmSync(h, { recursive: true, force: true }); });
 afterEach(() => {
   mock.timers.reset();
+  clearAllTyping();
   delete process.env.WA_CHANNEL_INBOX;
   delete process.env.WA_RECEIPT_EMOJI;
 });
@@ -108,17 +109,17 @@ test('a DM becomes one v1 line whose sender is the chat', async () => {
   assert.equal(line.replyToMsgId, null);
 });
 
-test('not written to v1: own messages, reactions, edits, non-allowlisted chats, send-acks', async () => {
+test('not written to v1: own messages, own reactions, non-allowlisted chats, send-acks', async () => {
   const dir = home();
   const inbox = path.join(dir, 'channel', 'inbox.jsonl');
   process.env.WA_CHANNEL_INBOX = inbox;
   const on = makeOnMessage(allow());
   const mine = inbound({ chat: GROUP, id: 'E1', fromMe: true, message: { conversation: 'from the factory' } });
   await on(mine.record, mine.raw);
-  const react = inbound({ chat: GROUP, id: 'R1', participant: ANNA, message: { reactionMessage: { text: '👍', key: { id: 'X' } } } });
-  await on(react.record, react.raw);
-  const edit = inbound({ chat: GROUP, id: 'P1', participant: ANNA, message: { protocolMessage: { key: { id: 'X' }, editedMessage: { conversation: 'fixed' } } } });
-  await on(edit.record, edit.raw);
+  const myReact = inbound({ chat: GROUP, id: 'R0', fromMe: true, message: { reactionMessage: { text: '👀', key: { id: 'X' } } } });
+  await on(myReact.record, myReact.raw);
+  const otherReact = inbound({ chat: 'other@g.us', id: 'R9', participant: ANNA, message: { reactionMessage: { text: '👍', key: { id: 'X' } } } });
+  await on(otherReact.record, otherReact.raw);
   const other = inbound({ chat: 'other@g.us', id: 'O1', participant: ANNA, message: { conversation: 'not ours' } });
   await on(other.record, other.raw);
   // A send-ack goes to the native inbox only.
@@ -126,6 +127,33 @@ test('not written to v1: own messages, reactions, edits, non-allowlisted chats, 
   await handleSendCommand({ type: 'send', jid: DM, nonce: 'n1', text: 'hello', echoTimeoutMs: 50 }, loadConfig());
   assert.deepEqual(lines(inbox), []);
   assert.ok(lines(path.join(dir, 'inbox.jsonl')).some((r) => r.type === 'send-ack'));
+});
+
+test('a reaction and an edit by a person become their own v1 lines, without a receipt', async () => {
+  const dir = home();
+  const inbox = path.join(dir, 'channel', 'inbox.jsonl');
+  const calls = [];
+  const ch = { inbox, emoji: '👀', react: async (...a) => { calls.push(a); } };
+  const on = makeOnMessage(allow(), () => {}, {}, () => {}, ch);
+  const react = inbound({ chat: GROUP, id: 'R1', participant: ANNA, message: { reactionMessage: { text: '👍', key: { id: '3EB0ABC' } } } });
+  await on(react.record, react.raw);
+  const unreact = inbound({ chat: DM, id: 'R2', message: { reactionMessage: { text: '', key: { id: 'D1' } } }, pushName: 'Bo' });
+  await on(unreact.record, unreact.raw);
+  const edit = inbound({ chat: GROUP, id: 'P1', participant: ANNA, message: { protocolMessage: { key: { id: '3EB0ABC' }, editedMessage: { conversation: 'Kan ni flytta den gröna knappen?' } } } });
+  await on(edit.record, edit.raw);
+  const sealed = inbound({ chat: GROUP, id: 'S1', participant: ANNA, message: { secretEncryptedMessage: { targetMessageKey: { id: '3EB0ABC' }, encPayload: 'AAAA' } } });
+  await on(sealed.record, sealed.raw);
+  const [r1, r2, e1, e2, ...rest] = lines(inbox).map(({ ingestedAt, ...l }) => l);
+  assert.equal(rest.length, 0);
+  const base = { v: 1, platform: 'wa', ts: '2026-10-31T20:00:00.000Z', spaceId: null, threadId: null, fromMe: false };
+  assert.deepEqual(r1, { ...base, kind: 'reaction', chatId: `wa:${GROUP}`, senderId: `wa:${ANNA}`, senderName: 'Anna', msgId: 'R1', targetMsgId: '3EB0ABC', emoji: '👍' });
+  assert.deepEqual(r2, { ...base, kind: 'reaction', chatId: `wa:${DM}`, senderId: `wa:${DM}`, senderName: 'Bo', msgId: 'R2', targetMsgId: 'D1', emoji: '' });
+  assert.deepEqual(e1, { ...base, kind: 'edit', chatId: `wa:${GROUP}`, senderId: `wa:${ANNA}`, senderName: 'Anna', msgId: 'P1', targetMsgId: '3EB0ABC', text: 'Kan ni flytta den gröna knappen?' });
+  assert.equal(e2.kind, 'edit');
+  assert.equal(e2.targetMsgId, '3EB0ABC');
+  assert.match(e2.text, /encrypted, cannot be read/);
+  assert.ok(!JSON.stringify(e2).includes('AAAA'));
+  assert.deepEqual(calls, [], 'no receipt on a reaction or an edit');
 });
 
 test('a saved document rides on the line as an attachment; one line per message', async () => {
@@ -226,6 +254,23 @@ test('receipt timeout: a react that never settles is cut off at the bound and th
   assert.equal(line.receipt, 'failed');
 });
 
+test('the receipt goes out on arrival, before a slow transcription; the line follows when the record is complete', async () => {
+  const dir = home();
+  const calls = [];
+  const ch = channelWith(dir, async (jid, key) => { calls.push(key.id); });
+  const slow = [process.execPath, '-e', "setTimeout(() => console.log('slow words'), 800)", '{input}'];
+  const { record, raw } = inbound({ chat: GROUP, id: 'V2', participant: ANNA, message: { audioMessage: { ptt: true, mimetype: 'audio/ogg; codecs=opus' } } });
+  const done = makeOnMessage(allow(), () => {}, { transcribe: slow }, () => {}, ch)(record, raw);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(calls, ['V2'], 'seen is placed while the voice note is still being transcribed');
+  assert.deepEqual(lines(ch.inbox), [], 'the line waits for the transcript');
+  await done;
+  const [line] = lines(ch.inbox);
+  assert.equal(line.text, 'slow words');
+  assert.equal(line.receipt, 'placed');
+  assert.deepEqual(calls, ['V2'], 'one receipt per message');
+});
+
 test('receipt from WA_RECEIPT_EMOJI goes through the real sendReaction with the group participant', async () => {
   const dir = home();
   process.env.WA_CHANNEL_INBOX = path.join(dir, 'channel', 'inbox.jsonl');
@@ -315,11 +360,13 @@ test('typing on twice for one chat keeps one set of timers', async () => {
   await handleSendCommand({ type: 'typing', jid: DM, on: false, nonce: 't5' }, loadConfig());
 });
 
-test('typing stops by itself after 180 s with paused', async () => {
+test('typing stops by itself after 600 s with paused', async () => {
   const { states } = await typingSetup();
   mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
   await handleSendCommand({ type: 'typing', jid: GROUP, on: true, nonce: 't6' }, loadConfig());
-  mock.timers.tick(179999); await flush();
+  mock.timers.tick(180000); await flush();
+  assert.deepEqual(typingJids(), [GROUP], 'still typing past the old 180 s cap');
+  mock.timers.tick(419999); await flush();
   assert.deepEqual(typingJids(), [GROUP]);
   mock.timers.tick(1); await flush();
   assert.deepEqual(typingJids(), []);
@@ -329,15 +376,46 @@ test('typing stops by itself after 180 s with paused', async () => {
   assert.equal(states(GROUP).length, n);
 });
 
-test('a message sent to the chat stops typing there (paused before the message), not in other chats', async () => {
+test('a message sent to a typing chat pauses just before it and resumes after; other chats are untouched', async () => {
   const { sock, states } = await typingSetup();
+  // One ordered log of presence and messages, to see paused land before the message.
+  const order = [];
+  const presence = sock.sendPresenceUpdate;
+  const send = sock.sendMessage;
+  sock.sendPresenceUpdate = async (state, jid) => { order.push(`${state}:${jid}`); return presence(state, jid); };
+  sock.sendMessage = async (jid, content, options) => { order.push(`message:${jid}`); return send(jid, content, options); };
   await handleSendCommand({ type: 'typing', jid: GROUP, on: true, nonce: 't7' }, loadConfig());
   await handleSendCommand({ type: 'typing', jid: DM, on: true, nonce: 't8' }, loadConfig());
   await handleSendCommand({ type: 'send', jid: GROUP, nonce: 's1', text: 'svar', echoTimeoutMs: 500 }, loadConfig());
-  assert.deepEqual(states(GROUP), ['composing', 'paused']);
-  assert.ok(sock.__sent.at(-1).content.text.endsWith('svar'));
+  await flush();
+  assert.deepEqual(order, [`composing:${GROUP}`, `composing:${DM}`, `paused:${GROUP}`, `message:${GROUP}`, `composing:${GROUP}`]);
+  assert.deepEqual(typingJids(), [GROUP, DM], 'typing continues for the rest of the turn');
+  // A failed send resumes too; on:false then ends it for good.
+  await handleSendCommand({ type: 'send-file', jid: GROUP, nonce: 's2', path: '/nonexistent/x.pdf' }, loadConfig());
+  await flush();
+  assert.deepEqual(states(GROUP).slice(-2), ['paused', 'composing']);
+  await handleSendCommand({ type: 'typing', jid: GROUP, on: false, nonce: 't9' }, loadConfig());
+  await handleSendCommand({ type: 'send', jid: GROUP, nonce: 's3', text: 'efter', echoTimeoutMs: 500 }, loadConfig());
+  await flush();
+  assert.equal(states(GROUP).at(-1), 'paused', 'no composing after typing was turned off');
   assert.deepEqual(typingJids(), [DM]);
-  await handleSendCommand({ type: 'typing', jid: DM, on: false, nonce: 't9' }, loadConfig());
+});
+
+test('the refresh does not show composing while a send to that chat is in flight', async () => {
+  const { sock, states } = await typingSetup();
+  mock.timers.enable({ apis: ['setInterval'] });
+  await handleSendCommand({ type: 'typing', jid: GROUP, on: true, nonce: 't10' }, loadConfig());
+  const send = sock.sendMessage;
+  let release;
+  sock.sendMessage = async (jid, content, options) => { await new Promise((r) => { release = r; }); return send(jid, content, options); };
+  const sending = handleSendCommand({ type: 'send', jid: GROUP, nonce: 's4', text: 'långsam', echoTimeoutMs: 500 }, loadConfig());
+  await flush();
+  mock.timers.tick(10000); await flush();
+  assert.deepEqual(states(GROUP), ['composing', 'paused'], 'no refresh between paused and the message');
+  release();
+  await sending;
+  await flush();
+  assert.equal(states(GROUP).at(-1), 'composing');
 });
 
 test('typing timers never keep the process alive', () => {
