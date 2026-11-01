@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
 import { queueTranscription } from './speech.js';
-import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -283,7 +283,41 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
  * carrying the same nonce so the waiting MCP tool call can pick it up.
  */
 /** The one list of outbox command types the watcher hands to handleSendCommand. A type handled there but missing here is silently skipped. */
-export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice', 'react', 'delete', 'typing']);
+export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice', 'react', 'delete', 'typing', 'read']);
+
+/**
+ * The message keys a read command marks: {remoteJid, id, fromMe:false, participant}. In a group
+ * WhatsApp needs each message's sender as participant; it comes from the command's optional
+ * `participants` map, else from the message's own stored record in inbox.jsonl (its senderJid is
+ * the key's participant, as for the receipt). An id with no known sender in a group is reported,
+ * not guessed. Returns { keys, errors }.
+ */
+export function readKeys(jid, msgIds, participants = {}) {
+  const group = jid.endsWith('@g.us');
+  const wanted = new Set(msgIds);
+  const stored = new Map();
+  if (group) {
+    const missing = msgIds.filter((id) => !participants[id]);
+    if (missing.length) {
+      const pending = new Set(missing);
+      // The message record itself (no type), not a media-saved/transcript record that shares its id.
+      for (const r of tailJsonLines(inboxPath(), pending.size, (r) => r.chatJid === jid && !r.type && !r.fromMe && pending.has(r.msgId))) {
+        stored.set(r.msgId, r.senderJid);
+      }
+    }
+  }
+  const keys = [];
+  const errors = [];
+  for (const id of wanted) {
+    const participant = group ? participants[id] || stored.get(id) : undefined;
+    if (group && !participant) {
+      errors.push({ msgId: id, error: 'sender unknown: not in inbox.jsonl and not in participants' });
+      continue;
+    }
+    keys.push({ remoteJid: jid, id, fromMe: false, ...(participant ? { participant } : {}) });
+  }
+  return { keys, errors };
+}
 
 // Typing indicator ({type:'typing', jid, on, nonce}): WhatsApp drops 'composing' after a few
 // seconds, so it is refreshed every 10 s until on:false or 600 s, then 'paused'. It covers the
@@ -385,6 +419,16 @@ export async function handleSendCommand(cmd, config) {
         if (cmd.on) await startTyping(jid);
         else await stopTyping(jid);
         ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId: null, typing: !!cmd.on };
+      } else if (cmd.type === 'read') {
+        // {type:'read', jid, nonce, msgIds, participants?}: marks those messages read (blue ticks), in one call.
+        // Leaves typing alone: it is sent while the agent works, not as a message.
+        if (!Array.isArray(cmd.msgIds) || !cmd.msgIds.length || cmd.msgIds.some((id) => typeof id !== 'string' || !id)) {
+          throw new Error('read needs msgIds: a non-empty array of message ids');
+        }
+        const { keys, errors } = readKeys(jid, cmd.msgIds, cmd.participants || {});
+        if (!keys.length) throw new Error(`no message could be marked read: ${errors.map((e) => `${e.msgId}: ${e.error}`).join('; ')}`);
+        await markRead(keys);
+        ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId: null, read: keys.map((k) => k.id), ...(errors.length ? { errors } : {}) };
       } else if (cmd.type === 'react') {
         // {type:'react', jid, nonce, msgId, emoji, fromMe?, participant?} — an empty emoji removes our reaction.
         if (!cmd.msgId) throw new Error('react needs msgId');
