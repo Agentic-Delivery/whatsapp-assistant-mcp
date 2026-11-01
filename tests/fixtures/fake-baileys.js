@@ -17,6 +17,7 @@ export default function makeWASocket(_config) {
   const ev = new EventEmitter();
   const sent = [];
   const presence = [];
+  const reads = [];
   const sock = {
     ev,
     user: { id: 'fake-self@s.whatsapp.net' },
@@ -43,9 +44,12 @@ export default function makeWASocket(_config) {
     },
     // Chat presence (typing indicator): recorded, never sent anywhere.
     sendPresenceUpdate: async (state, jid) => { presence.push({ state, jid }); },
+    // Read receipts (blue ticks): each call's keys recorded, never sent anywhere.
+    readMessages: async (keys) => { reads.push(keys); },
     requestPairingCode: async (_phoneNumber) => '123-456',
     __sent: sent,
     __presence: presence,
+    __reads: reads,
   };
   createdSockets.push(sock);
   // Real Baileys reaches "open" asynchronously after a handshake; emitting it on

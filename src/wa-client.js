@@ -341,6 +341,12 @@ export async function sendReaction(jid, targetKey, emoji) {
   return result?.key?.id || null;
 }
 
+/** Marks messages read (blue ticks) with one Baileys readMessages call. `keys` are full message keys. Daemon-only. */
+export async function markRead(keys) {
+  if (!sockRef) throw new Error('No active WhatsApp connection. markRead() must run inside the daemon process.');
+  await sockRef.readMessages(keys);
+}
+
 /** Deletes one of OUR OWN messages for everyone (WhatsApp "revoke"). Never touches anyone else's message. Daemon-only. */
 export async function deleteOwnMessage(jid, msgId) {
   if (!sockRef) throw new Error('No active WhatsApp connection. deleteOwnMessage() must run inside the daemon process.');

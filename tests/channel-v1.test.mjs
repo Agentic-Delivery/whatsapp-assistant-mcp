@@ -437,3 +437,82 @@ test('typing timers never keep the process alive', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /typing started/);
 });
+
+// --- read (blue ticks) and no receipt on arrival (contract §4.9) -------------------------
+
+test('with WA_RECEIPT_EMOJI unset the v1 line has receipt null and no reaction is sent', async () => {
+  const dir = home();
+  process.env.WA_CHANNEL_INBOX = path.join(dir, 'channel', 'inbox.jsonl');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const sock = createdSockets.at(-1);
+  const g = inbound({ chat: GROUP, id: 'N1', participant: ANNA, message: { conversation: 'hej' } });
+  await makeOnMessage(allow())(g.record, g.raw);
+  const doc = inbound({ chat: DM, id: 'N2', message: { documentMessage: { fileName: 'x.pdf', mimetype: 'application/pdf' } } });
+  await makeOnMessage(allow())(doc.record, doc.raw);
+  assert.deepEqual(lines(process.env.WA_CHANNEL_INBOX).map((l) => l.receipt), [null, null]);
+  assert.deepEqual(sock.__sent, [], 'nothing at all is sent on arrival');
+});
+
+test('read marks a group message (participant from the stored record or the command) and a DM message in one call', async () => {
+  const dir = home();
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const sock = createdSockets.at(-1);
+  const BO = '46722222222@s.whatsapp.net';
+  // Stored the way the daemon stores them; the media-saved record shares the id and must not confuse the lookup.
+  const on = makeOnMessage(allow());
+  const g = inbound({ chat: GROUP, id: 'G1', participant: ANNA, message: { documentMessage: { fileName: 'x.pdf', mimetype: 'application/pdf' } } });
+  await on(g.record, g.raw);
+  await handleSendCommand({ type: 'read', jid: GROUP, msgIds: ['G1', 'G2'], participants: { G2: BO }, nonce: 'rd1' }, loadConfig());
+  assert.deepEqual(sock.__reads, [[
+    { remoteJid: GROUP, id: 'G1', fromMe: false, participant: ANNA },
+    { remoteJid: GROUP, id: 'G2', fromMe: false, participant: BO },
+  ]]);
+  await handleSendCommand({ type: 'read', jid: DM, msgIds: ['D1', 'D2'], nonce: 'rd2' }, loadConfig());
+  assert.deepEqual(sock.__reads[1], [{ remoteJid: DM, id: 'D1', fromMe: false }, { remoteJid: DM, id: 'D2', fromMe: false }]);
+  const acks = lines(path.join(dir, 'inbox.jsonl')).filter((r) => r.type === 'send-ack');
+  assert.deepEqual(acks.map((a) => [a.nonce, a.ok, a.read, a.errors]), [['rd1', true, ['G1', 'G2'], undefined], ['rd2', true, ['D1', 'D2'], undefined]]);
+  assert.equal(sock.__sent.length, 0, 'read sends no message and no reaction');
+});
+
+test('read reports a group id whose sender is unknown, and fails when no id can be marked', async () => {
+  const dir = home();
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const sock = createdSockets.at(-1);
+  await handleSendCommand({ type: 'read', jid: GROUP, msgIds: ['K1', 'U1'], participants: { K1: ANNA }, nonce: 'rd3' }, loadConfig());
+  await handleSendCommand({ type: 'read', jid: GROUP, msgIds: ['U2'], nonce: 'rd4' }, loadConfig());
+  await handleSendCommand({ type: 'read', jid: DM, msgIds: [], nonce: 'rd5' }, loadConfig());
+  assert.deepEqual(sock.__reads, [[{ remoteJid: GROUP, id: 'K1', fromMe: false, participant: ANNA }]]);
+  const [a3, a4, a5] = lines(path.join(dir, 'inbox.jsonl')).filter((r) => r.type === 'send-ack');
+  assert.equal(a3.ok, true);
+  assert.deepEqual(a3.read, ['K1']);
+  assert.deepEqual(a3.errors.map((e) => e.msgId), ['U1']);
+  assert.equal(a4.ok, false);
+  assert.match(a4.error, /U2: sender unknown/);
+  assert.equal(a5.ok, false);
+  assert.match(a5.error, /non-empty array/);
+});
+
+test('read is refused outside the allowlist or without canPost, like react', async () => {
+  assert.ok(OUTBOX_TYPES.has('read'));
+  const dir = home([{ jid: GROUP, name: 'G', canPost: false }]);
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  await handleSendCommand({ type: 'read', jid: GROUP, msgIds: ['X1'], participants: { X1: ANNA }, nonce: 'rd6' }, loadConfig());
+  await handleSendCommand({ type: 'read', jid: DM, msgIds: ['X2'], nonce: 'rd7' }, loadConfig());
+  const [a, b] = lines(path.join(dir, 'inbox.jsonl'));
+  assert.match(a.error, /canPost is false/);
+  assert.match(b.error, /not in allowlist/);
+  assert.deepEqual(createdSockets.at(-1).__reads, []);
+});
+
+test('read leaves typing running: no paused, no stop', async () => {
+  const { states } = await typingSetup();
+  await handleSendCommand({ type: 'typing', jid: DM, on: true, nonce: 'rt1' }, loadConfig());
+  await handleSendCommand({ type: 'read', jid: DM, msgIds: ['D9'], nonce: 'rt2' }, loadConfig());
+  await flush();
+  assert.deepEqual(states(DM), ['composing']);
+  assert.deepEqual(typingJids(), [DM]);
+});

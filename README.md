@@ -238,6 +238,12 @@ The raw outbox commands, for scripts that run next to the daemon:
 | send a voice note | `{"type":"send-voice", "jid", "nonce", "path"}` (Ogg/Opus `.ogg`) |
 | delete one of this account's own messages for everyone | `{"type":"delete", "jid", "nonce", "msgId"}` |
 | show or stop "typing…" | `{"type":"typing", "jid", "nonce", "on"}` |
+| mark messages read (blue ticks) | `{"type":"read", "jid", "nonce", "msgIds", "participants?"}` |
+
+`read` marks the listed messages read in one call. In a group each message's sender is
+taken from `participants` (`{msgId: senderJid}`) or else from the message's record in
+`inbox.jsonl`; an id whose sender is unknown is listed in the ack's `errors` and not marked.
+It acks `ok:true, read:[ids]`, obeys the allowlist and `canPost`, and leaves typing alone.
 
 `quote: {msgId, participant?, fromMe?, text?}` sends the text as a WhatsApp reply to that
 message (in a group, `participant` is the quoted message's sender; `text` only fills the
