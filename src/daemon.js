@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
 import { queueTranscription } from './speech.js';
-import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities, bareJid } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -107,6 +107,41 @@ export function placeReceipt(channel, record, raw) {
   return Promise.race([attempt, timeout]).finally(() => clearTimeout(timer));
 }
 
+// Ids of messages sent from this account (by the daemon or by a person on another client of the
+// same shared number: both arrive fromMe) seen this run, so a quote of one counts as a quote of
+// us even when the quote carries no participant. In memory, bounded; after a restart the
+// participant check (below) carries the rule alone.
+const OWN_IDS_MAX = 5000;
+const ownMsgIds = new Set();
+export function rememberOwnMessage(msgId) {
+  if (!msgId) return;
+  ownMsgIds.delete(msgId);
+  ownMsgIds.add(msgId);
+  if (ownMsgIds.size > OWN_IDS_MAX) ownMsgIds.delete(ownMsgIds.values().next().value);
+}
+export function clearOwnMessages() { ownMsgIds.clear(); }
+
+/**
+ * Whether an inbound message is addressed to this account (vd-server channel-interface §4.15):
+ * true in a 1:1 chat; in a group, true when it @-mentions us (phone jid or LID) or quotes a
+ * message from this account (the quote's participant is one of our ids, or its stanza id is a
+ * message we sent this run). When information is missing it errs to true, since a false
+ * negative hides a real question and a false positive only costs a receipt: our own ids unknown
+ * (not connected yet) with any mention or quote, or a quote with no participant whose id we do
+ * not know. `selves` defaults to the live connection's ids.
+ */
+export function isAddressed(record, selves = selfIdentities()) {
+  if (!record.chatJid || !record.chatJid.endsWith('@g.us')) return true;
+  const me = new Set(selves.map(bareJid).filter(Boolean));
+  const mentioned = Array.isArray(record.mentionedJids) ? record.mentionedJids : [];
+  if (mentioned.length > 0 && (me.size === 0 || mentioned.some((j) => me.has(bareJid(j))))) return true;
+  const quoted = !!(record.replyToMsgId || record.replyToParticipant);
+  if (!quoted) return false;
+  if (record.replyToMsgId && ownMsgIds.has(record.replyToMsgId)) return true;
+  if (!record.replyToParticipant || me.size === 0) return true;
+  return me.has(bareJid(record.replyToParticipant));
+}
+
 /**
  * Writes the one v1 line for an inbound message once its record is complete. `receipt` is the
  * promise of the receipt attempt started when the message arrived (null when receipts are off);
@@ -134,6 +169,7 @@ export async function writeChannelMessage(channel, record, raw, { text, attachme
     fromMe: false,
     text: text || record.text,
     replyToMsgId: record.replyToMsgId || null,
+    addressed: isAddressed(record),
     attachments,
     receipt,
   });
@@ -221,6 +257,7 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
       record = { ...record, replyToText: null, replyToTextWithheld: true };
     }
     appendInbox(record);
+    if (record.fromMe && !record.type) rememberOwnMessage(record.msgId);
     // Channel v1, reactions and edits: one line each, at once, no receipt.
     if (channel) {
       const event = channelEventLine(record, raw);

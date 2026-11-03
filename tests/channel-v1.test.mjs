@@ -14,8 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.js';
 import { connect, extractMessageRecords } from '../src/wa-client.js';
 import {
-  adapterEventsFor, channelFromEnv, clearAllTyping, handleSendCommand, makeOnMessage, OUTBOX_TYPES,
-  typingJids, writeChannelAdapterEvent,
+  adapterEventsFor, channelFromEnv, clearAllTyping, clearOwnMessages, handleSendCommand, isAddressed, makeOnMessage,
+  OUTBOX_TYPES, typingJids, writeChannelAdapterEvent,
 } from '../src/daemon.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -89,7 +89,7 @@ test('a group message becomes one v1 line with prefixed ids, WhatsApp time and r
     v: 1, kind: 'message', platform: 'wa', ts: '2026-10-31T20:00:00.000Z',
     chatId: `wa:${GROUP}`, spaceId: null, threadId: null, msgId: '3EB0ABC',
     senderId: `wa:${ANNA}`, senderName: 'Anna', fromMe: false,
-    text: 'Kan ni flytta knappen?', replyToMsgId: '3EB0Q', attachments: [], receipt: null,
+    text: 'Kan ni flytta knappen?', replyToMsgId: '3EB0Q', addressed: true, attachments: [], receipt: null,
   });
   assert.equal(fs.statSync(inbox).mode & 0o777, 0o600);
   assert.equal(fs.statSync(path.dirname(inbox)).mode & 0o777, 0o700);
@@ -515,4 +515,82 @@ test('read leaves typing running: no paused, no stop', async () => {
   await flush();
   assert.deepEqual(states(DM), ['composing']);
   assert.deepEqual(typingJids(), [DM]);
+});
+
+// --- addressed (contract §4.15) ----------------------------------------------------------
+
+const SELF_PN = '46799999999@s.whatsapp.net';
+const SELF_LID = '111222333@lid';
+const BO = '46722222222@s.whatsapp.net';
+
+/** A fresh home and a connected fake socket whose own ids are given as real Baileys gives them (with a device suffix). */
+async function connectAs(user = { id: '46799999999:7@s.whatsapp.net', lid: '111222333:7@lid' }) {
+  const dir = home();
+  process.env.WA_CHANNEL_INBOX = path.join(dir, 'channel', 'inbox.jsonl');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  createdSockets.at(-1).user = user;
+  clearOwnMessages();
+  return process.env.WA_CHANNEL_INBOX;
+}
+
+async function addressedOf(msg) {
+  const inbox = await connectAs();
+  const { record, raw } = inbound(msg);
+  await makeOnMessage(allow())(record, raw);
+  const [line] = lines(inbox);
+  assert.equal(line.kind, 'message');
+  return line.addressed;
+}
+
+const quoting = (text, contextInfo) => ({ extendedTextMessage: { text, contextInfo } });
+
+test('addressed: a 1:1 message is addressed', async () => {
+  assert.equal(await addressedOf({ chat: DM, id: 'A1', message: { conversation: 'Hej' } }), true);
+});
+
+test('addressed: a group message mentioning us, by phone jid or by LID, is addressed', async () => {
+  assert.equal(await addressedOf({ chat: GROUP, id: 'A2', participant: ANNA, message: quoting('@bot kan du?', { mentionedJid: [SELF_PN] }) }), true);
+  assert.equal(await addressedOf({ chat: GROUP, id: 'A3', participant: ANNA, message: quoting('@bot kan du?', { mentionedJid: ['111222333:3@lid'] }) }), true);
+});
+
+test('addressed: a group reply quoting our message (participant our jid or LID) is addressed', async () => {
+  const q = { quotedMessage: { conversation: 'Klart' }, stanzaId: 'OURS1' };
+  assert.equal(await addressedOf({ chat: GROUP, id: 'A4', participant: ANNA, message: quoting('ja', { ...q, participant: SELF_PN }) }), true);
+  assert.equal(await addressedOf({ chat: GROUP, id: 'A5', participant: ANNA, message: quoting('ja', { ...q, participant: SELF_LID }) }), true);
+});
+
+test('addressed: a quote of a message this account sent this run counts by its id, whoever is named as participant', async () => {
+  const inbox = await connectAs();
+  const on = makeOnMessage(allow());
+  // Sent from another client of the shared number: arrives fromMe.
+  const mine = inbound({ chat: GROUP, id: 'SENT1', fromMe: true, message: { conversation: 'Vi tittar på det' } });
+  await on(mine.record, mine.raw);
+  const reply = inbound({ chat: GROUP, id: 'A6', participant: ANNA, message: quoting('tack', { stanzaId: 'SENT1', participant: 'someone-else@lid', quotedMessage: { conversation: 'Vi tittar på det' } }) });
+  await on(reply.record, reply.raw);
+  assert.deepEqual(lines(inbox).map((l) => [l.msgId, l.addressed]), [['A6', true]]);
+});
+
+test('not addressed: a group message without mention or quote', async () => {
+  assert.equal(await addressedOf({ chat: GROUP, id: 'B1', participant: ANNA, message: { conversation: 'hej allihop' } }), false);
+});
+
+test('not addressed: a group reply to another human', async () => {
+  assert.equal(await addressedOf({ chat: GROUP, id: 'B2', participant: ANNA, message: quoting('håller med', { stanzaId: 'BOS1', participant: BO, quotedMessage: { conversation: 'Bra idé' } }) }), false);
+});
+
+test('not addressed: a group message mentioning someone else', async () => {
+  assert.equal(await addressedOf({ chat: GROUP, id: 'B3', participant: ANNA, message: quoting('@Bo kolla', { mentionedJid: [BO] }) }), false);
+});
+
+test('addressed when information is missing: own ids unknown, or a quote without participant', () => {
+  const base = { chatJid: GROUP, msgId: 'C1', mentionedJids: [], replyToMsgId: null, replyToParticipant: null };
+  // Own ids unknown (not connected yet): any mention or quote errs to addressed; plain talk does not.
+  assert.equal(isAddressed({ ...base, mentionedJids: [BO] }, []), true);
+  assert.equal(isAddressed({ ...base, replyToMsgId: 'X', replyToParticipant: BO }, []), true);
+  assert.equal(isAddressed(base, []), false);
+  // A quote whose participant is missing and whose id we do not know.
+  assert.equal(isAddressed({ ...base, replyToMsgId: 'UNKNOWN' }, [SELF_PN]), true);
+  // A record without a chat is treated as 1:1.
+  assert.equal(isAddressed({ msgId: 'C2' }, [SELF_PN]), true);
 });

@@ -412,7 +412,7 @@ function upsertContactName(contact) {
 }
 
 /** A jid without its device suffix (`46…:1@s.whatsapp.net` → `46…@s.whatsapp.net`). */
-function bareJid(jid) {
+export function bareJid(jid) {
   return typeof jid === 'string' ? jid.replace(/:\d+@/, '@') : null;
 }
 
