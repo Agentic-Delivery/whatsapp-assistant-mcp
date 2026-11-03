@@ -392,11 +392,31 @@ unless set; the native `inbox.jsonl` is unchanged either way.
 
 | Variable | Effect |
 |---|---|
-| `WA_CHANNEL_INBOX=<path>` | Appends one v1 line per message from a readable allowlisted chat that is not ours and has text (a voice note's transcript counts): `chatId`/`senderId` as `wa:<jid>`, `msgId`, `ts` (when sent), `ingestedAt`, `replyToMsgId`, `attachments` (`[{name, mime, bytes, path}]` once saved) and `receipt`. A reaction by a person is written as `kind:"reaction"` (`msgId` of the reaction, `targetMsgId`, `emoji`, empty when removed) and an edit as `kind:"edit"` (`targetMsgId`, `text`), both with `chatId`, `senderId`, `senderName`, `ts`, `fromMe` and no receipt. Deletions, our own messages and acks are not written. Connection changes are written as `kind:"adapter"` lines with `event` `connected`, `disconnected`, `reconnecting` or `auth-failed`. The directory is created 0700, the file 0600; each line is one append, so several adapters can share the file. |
+| `WA_CHANNEL_INBOX=<path>` | Appends one v1 line per message from a readable allowlisted chat that is not ours and has text (a voice note's transcript counts): `chatId`/`senderId` as `wa:<jid>`, `msgId`, `ts` (when sent), `ingestedAt`, `replyToMsgId`, `addressed` (below), `attachments` (`[{name, mime, bytes, path}]` once saved) and `receipt`. A reaction by a person is written as `kind:"reaction"` (`msgId` of the reaction, `targetMsgId`, `emoji`, empty when removed) and an edit as `kind:"edit"` (`targetMsgId`, `text`), both with `chatId`, `senderId`, `senderName`, `ts`, `fromMe` and no receipt. Deletions, our own messages and acks are not written. Connection changes are written as `kind:"adapter"` lines with `event` `connected`, `disconnected`, `reconnecting` or `auth-failed`. The directory is created 0700, the file 0600; each line is one append, so several adapters can share the file. |
 | `WA_RECEIPT_EMOJI=<emoji>` | With `WA_CHANNEL_INBOX`: reacts with this emoji on each such message as soon as it arrives, before any download or transcription, and records (waiting at most 3 s from arrival) `receipt: "placed"` or `"failed"` on the line (`null` when unset). A failed receipt never holds back the line. |
 
 A message with media is written once its download is done, and a voice note once its
 transcript is ready (or has failed), so each message is one line.
+
+Each `message` line also carries `addressed` (boolean, always written), which says whether the
+message is meant for this account:
+
+- `true` in a 1:1 chat;
+- `true` in a group when it @-mentions this account, by phone-number jid or by LID (both of the
+  connection's own ids, `sock.user.id` and `sock.user.lid`, device suffix ignored);
+- `true` in a group when it quotes a message from this account: the quote's participant is one
+  of those ids, or the quoted message id is one this account sent during this daemon run. The
+  number may be shared with people on other clients; their messages arrive as ours, so a quote
+  of one of them counts as addressed too;
+- `false` otherwise (a group message with no mention, a reply to another person, a mention of
+  someone else).
+
+Where information is missing it errs to `true`, because a missed question costs more than an
+extra receipt: before the connection knows its own ids, any mention or quote counts as
+addressed, and so does a quote that names no participant and whose id is not known. The list of
+sent ids lives in memory only, so after a restart the participant check carries the quote rule
+alone. A reader that does not know the field treats a line as addressed, which is what older
+lines without it mean.
 
 ## Troubleshooting
 
