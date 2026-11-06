@@ -63,7 +63,7 @@ test('channel v1 is off when WA_CHANNEL_INBOX is unset: nothing is written beyon
   const dir = home();
   const would = path.join(dir, 'channel', 'inbox.jsonl');
   assert.equal(channelFromEnv(), null);
-  const { record, raw } = inbound({ chat: GROUP, id: 'M0', participant: ANNA, message: { conversation: 'hej' } });
+  const { record, raw } = inbound({ chat: GROUP, id: 'M0', participant: ANNA, message: { conversation: 'hi' } });
   await makeOnMessage(allow())(record, raw);
   writeChannelAdapterEvent('connected');
   assert.equal(fs.existsSync(would), false);
@@ -77,7 +77,7 @@ test('a group message becomes one v1 line with prefixed ids, WhatsApp time and r
   process.env.WA_CHANNEL_INBOX = inbox;
   const { record, raw } = inbound({
     chat: GROUP, id: '3EB0ABC', participant: ANNA,
-    message: { extendedTextMessage: { text: 'Kan ni flytta knappen?', contextInfo: { stanzaId: '3EB0Q', participant: DM, quotedMessage: { conversation: 'Klart' } } } },
+    message: { extendedTextMessage: { text: 'Can you move the button?', contextInfo: { stanzaId: '3EB0Q', participant: DM, quotedMessage: { conversation: 'Done' } } } },
   });
   const before = Date.now();
   await makeOnMessage(allow())(record, raw);
@@ -89,7 +89,7 @@ test('a group message becomes one v1 line with prefixed ids, WhatsApp time and r
     v: 1, kind: 'message', platform: 'wa', ts: '2026-10-31T20:00:00.000Z',
     chatId: `wa:${GROUP}`, spaceId: null, threadId: null, msgId: '3EB0ABC',
     senderId: `wa:${ANNA}`, senderName: 'Anna', fromMe: false,
-    text: 'Kan ni flytta knappen?', replyToMsgId: '3EB0Q', addressed: true, attachments: [], receipt: null,
+    text: 'Can you move the button?', replyToMsgId: '3EB0Q', addressed: true, attachments: [], receipt: null,
   });
   assert.equal(fs.statSync(inbox).mode & 0o777, 0o600);
   assert.equal(fs.statSync(path.dirname(inbox)).mode & 0o777, 0o700);
@@ -99,7 +99,7 @@ test('a DM becomes one v1 line whose sender is the chat', async () => {
   const dir = home();
   const inbox = path.join(dir, 'channel', 'inbox.jsonl');
   process.env.WA_CHANNEL_INBOX = inbox;
-  const { record, raw } = inbound({ chat: DM, id: 'D1', message: { conversation: 'Hej' }, pushName: 'Bo' });
+  const { record, raw } = inbound({ chat: DM, id: 'D1', message: { conversation: 'Hi' }, pushName: 'Bo' });
   await makeOnMessage(allow())(record, raw);
   const [line] = lines(inbox);
   assert.equal(line.chatId, `wa:${DM}`);
@@ -139,7 +139,7 @@ test('a reaction and an edit by a person become their own v1 lines, without a re
   await on(react.record, react.raw);
   const unreact = inbound({ chat: DM, id: 'R2', message: { reactionMessage: { text: '', key: { id: 'D1' } } }, pushName: 'Bo' });
   await on(unreact.record, unreact.raw);
-  const edit = inbound({ chat: GROUP, id: 'P1', participant: ANNA, message: { protocolMessage: { key: { id: '3EB0ABC' }, editedMessage: { conversation: 'Kan ni flytta den gröna knappen?' } } } });
+  const edit = inbound({ chat: GROUP, id: 'P1', participant: ANNA, message: { protocolMessage: { key: { id: '3EB0ABC' }, editedMessage: { conversation: 'Can you move the green button?' } } } });
   await on(edit.record, edit.raw);
   const sealed = inbound({ chat: GROUP, id: 'S1', participant: ANNA, message: { secretEncryptedMessage: { targetMessageKey: { id: '3EB0ABC' }, encPayload: 'AAAA' } } });
   await on(sealed.record, sealed.raw);
@@ -148,7 +148,7 @@ test('a reaction and an edit by a person become their own v1 lines, without a re
   const base = { v: 1, platform: 'wa', ts: '2026-10-31T20:00:00.000Z', spaceId: null, threadId: null, fromMe: false };
   assert.deepEqual(r1, { ...base, kind: 'reaction', chatId: `wa:${GROUP}`, senderId: `wa:${ANNA}`, senderName: 'Anna', msgId: 'R1', targetMsgId: '3EB0ABC', emoji: '👍' });
   assert.deepEqual(r2, { ...base, kind: 'reaction', chatId: `wa:${DM}`, senderId: `wa:${DM}`, senderName: 'Bo', msgId: 'R2', targetMsgId: 'D1', emoji: '' });
-  assert.deepEqual(e1, { ...base, kind: 'edit', chatId: `wa:${GROUP}`, senderId: `wa:${ANNA}`, senderName: 'Anna', msgId: 'P1', targetMsgId: '3EB0ABC', text: 'Kan ni flytta den gröna knappen?' });
+  assert.deepEqual(e1, { ...base, kind: 'edit', chatId: `wa:${GROUP}`, senderId: `wa:${ANNA}`, senderName: 'Anna', msgId: 'P1', targetMsgId: '3EB0ABC', text: 'Can you move the green button?' });
   assert.equal(e2.kind, 'edit');
   assert.equal(e2.targetMsgId, '3EB0ABC');
   assert.match(e2.text, /encrypted, cannot be read/);
@@ -216,8 +216,8 @@ test('receipt placed: the react names the sender in a group and nobody in a DM, 
   const dir = home();
   const calls = [];
   const ch = channelWith(dir, async (jid, key, emoji) => { calls.push({ jid, key, emoji }); return 'r1'; });
-  const g = inbound({ chat: GROUP, id: 'G1', participant: ANNA, message: { conversation: 'hej' } });
-  const d = inbound({ chat: DM, id: 'D1', message: { conversation: 'hej' } });
+  const g = inbound({ chat: GROUP, id: 'G1', participant: ANNA, message: { conversation: 'hi' } });
+  const d = inbound({ chat: DM, id: 'D1', message: { conversation: 'hi' } });
   await makeOnMessage(allow(), () => {}, {}, () => {}, ch)(g.record, g.raw);
   await makeOnMessage(allow(), () => {}, {}, () => {}, ch)(d.record, d.raw);
   assert.deepEqual(calls, [
@@ -230,18 +230,18 @@ test('receipt placed: the react names the sender in a group and nobody in a DM, 
 test('receipt failed: a rejected react still writes the line, receipt failed', async () => {
   const dir = home();
   const ch = channelWith(dir, async () => { throw new Error('No active WhatsApp connection'); });
-  const g = inbound({ chat: GROUP, id: 'G2', participant: ANNA, message: { conversation: 'hej' } });
+  const g = inbound({ chat: GROUP, id: 'G2', participant: ANNA, message: { conversation: 'hi' } });
   await makeOnMessage(allow(), () => {}, {}, () => {}, ch)(g.record, g.raw);
   const [line] = lines(ch.inbox);
   assert.equal(line.receipt, 'failed');
-  assert.equal(line.text, 'hej');
+  assert.equal(line.text, 'hi');
 });
 
 test('receipt timeout: a react that never settles is cut off at the bound and the line is still written', async () => {
   const dir = home();
   const ch = channelWith(dir, () => new Promise(() => {}), 3000);
   mock.timers.enable({ apis: ['setTimeout'] });
-  const g = inbound({ chat: GROUP, id: 'G3', participant: ANNA, message: { conversation: 'hej' } });
+  const g = inbound({ chat: GROUP, id: 'G3', participant: ANNA, message: { conversation: 'hi' } });
   const done = makeOnMessage(allow(), () => {}, {}, () => {}, ch)(g.record, g.raw);
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(lines(ch.inbox), [], 'the line waits for the receipt attempt');
@@ -277,7 +277,7 @@ test('receipt from WA_RECEIPT_EMOJI goes through the real sendReaction with the 
   process.env.WA_RECEIPT_EMOJI = '👀';
   const { createdSockets } = await import('./fixtures/fake-baileys.js');
   await connect({ reconnect: false, onMessage: () => {} });
-  const g = inbound({ chat: GROUP, id: 'G4', participant: ANNA, message: { conversation: 'hej' } });
+  const g = inbound({ chat: GROUP, id: 'G4', participant: ANNA, message: { conversation: 'hi' } });
   await makeOnMessage(allow())(g.record, g.raw);
   const react = createdSockets.at(-1).__sent.at(-1).content.react;
   assert.deepEqual(react, { text: '👀', key: { remoteJid: GROUP, id: 'G4', fromMe: false, participant: ANNA } });
@@ -291,9 +291,9 @@ test('send with quote goes out as a quoted reply; without quote nothing changes;
   const { createdSockets } = await import('./fixtures/fake-baileys.js');
   await connect({ reconnect: false, onMessage: () => {} });
   const sock = createdSockets.at(-1);
-  await handleSendCommand({ type: 'send', jid: GROUP, nonce: 'q1', text: 'Ja', quote: { msgId: '3EB0ABC', participant: ANNA, text: 'Kan ni?' }, echoTimeoutMs: 500 }, loadConfig());
+  await handleSendCommand({ type: 'send', jid: GROUP, nonce: 'q1', text: 'Yes', quote: { msgId: '3EB0ABC', participant: ANNA, text: 'Can you?' }, echoTimeoutMs: 500 }, loadConfig());
   const sent = sock.__sent.at(-1);
-  assert.deepEqual(sent.options, { quoted: { key: { remoteJid: GROUP, id: '3EB0ABC', fromMe: false, participant: ANNA }, message: { conversation: 'Kan ni?' } } });
+  assert.deepEqual(sent.options, { quoted: { key: { remoteJid: GROUP, id: '3EB0ABC', fromMe: false, participant: ANNA }, message: { conversation: 'Can you?' } } });
   await handleSendCommand({ type: 'send', jid: DM, nonce: 'q2', text: 'Nej', quote: { msgId: 'OWN1', fromMe: true }, echoTimeoutMs: 500 }, loadConfig());
   assert.deepEqual(sock.__sent.at(-1).options.quoted, { key: { remoteJid: DM, id: 'OWN1', fromMe: true }, message: { conversation: '' } });
   await handleSendCommand({ type: 'send', jid: DM, nonce: 'q3', text: 'plain', echoTimeoutMs: 500 }, loadConfig());
@@ -386,7 +386,7 @@ test('a message sent to a typing chat pauses just before it and resumes after; o
   sock.sendMessage = async (jid, content, options) => { order.push(`message:${jid}`); return send(jid, content, options); };
   await handleSendCommand({ type: 'typing', jid: GROUP, on: true, nonce: 't7' }, loadConfig());
   await handleSendCommand({ type: 'typing', jid: DM, on: true, nonce: 't8' }, loadConfig());
-  await handleSendCommand({ type: 'send', jid: GROUP, nonce: 's1', text: 'svar', echoTimeoutMs: 500 }, loadConfig());
+  await handleSendCommand({ type: 'send', jid: GROUP, nonce: 's1', text: 'answer', echoTimeoutMs: 500 }, loadConfig());
   await flush();
   assert.deepEqual(order, [`composing:${GROUP}`, `composing:${DM}`, `paused:${GROUP}`, `message:${GROUP}`, `composing:${GROUP}`]);
   assert.deepEqual(typingJids(), [GROUP, DM], 'typing continues for the rest of the turn');
@@ -408,7 +408,7 @@ test('the refresh does not show composing while a send to that chat is in flight
   const send = sock.sendMessage;
   let release;
   sock.sendMessage = async (jid, content, options) => { await new Promise((r) => { release = r; }); return send(jid, content, options); };
-  const sending = handleSendCommand({ type: 'send', jid: GROUP, nonce: 's4', text: 'långsam', echoTimeoutMs: 500 }, loadConfig());
+  const sending = handleSendCommand({ type: 'send', jid: GROUP, nonce: 's4', text: 'slow', echoTimeoutMs: 500 }, loadConfig());
   await flush();
   mock.timers.tick(10000); await flush();
   assert.deepEqual(states(GROUP), ['composing', 'paused'], 'no refresh between paused and the message');
@@ -446,7 +446,7 @@ test('with WA_RECEIPT_EMOJI unset the v1 line has receipt null and no reaction i
   const { createdSockets } = await import('./fixtures/fake-baileys.js');
   await connect({ reconnect: false, onMessage: () => {} });
   const sock = createdSockets.at(-1);
-  const g = inbound({ chat: GROUP, id: 'N1', participant: ANNA, message: { conversation: 'hej' } });
+  const g = inbound({ chat: GROUP, id: 'N1', participant: ANNA, message: { conversation: 'hi' } });
   await makeOnMessage(allow())(g.record, g.raw);
   const doc = inbound({ chat: DM, id: 'N2', message: { documentMessage: { fileName: 'x.pdf', mimetype: 'application/pdf' } } });
   await makeOnMessage(allow())(doc.record, doc.raw);
@@ -546,7 +546,7 @@ async function addressedOf(msg) {
 const quoting = (text, contextInfo) => ({ extendedTextMessage: { text, contextInfo } });
 
 test('addressed: a 1:1 message is addressed', async () => {
-  assert.equal(await addressedOf({ chat: DM, id: 'A1', message: { conversation: 'Hej' } }), true);
+  assert.equal(await addressedOf({ chat: DM, id: 'A1', message: { conversation: 'Hi' } }), true);
 });
 
 test('addressed: a group message mentioning us, by phone jid or by LID, is addressed', async () => {
@@ -555,32 +555,32 @@ test('addressed: a group message mentioning us, by phone jid or by LID, is addre
 });
 
 test('addressed: a group reply quoting our message (participant our jid or LID) is addressed', async () => {
-  const q = { quotedMessage: { conversation: 'Klart' }, stanzaId: 'OURS1' };
-  assert.equal(await addressedOf({ chat: GROUP, id: 'A4', participant: ANNA, message: quoting('ja', { ...q, participant: SELF_PN }) }), true);
-  assert.equal(await addressedOf({ chat: GROUP, id: 'A5', participant: ANNA, message: quoting('ja', { ...q, participant: SELF_LID }) }), true);
+  const q = { quotedMessage: { conversation: 'Done' }, stanzaId: 'OURS1' };
+  assert.equal(await addressedOf({ chat: GROUP, id: 'A4', participant: ANNA, message: quoting('yes', { ...q, participant: SELF_PN }) }), true);
+  assert.equal(await addressedOf({ chat: GROUP, id: 'A5', participant: ANNA, message: quoting('yes', { ...q, participant: SELF_LID }) }), true);
 });
 
 test('addressed: a quote of a message this account sent this run counts by its id, whoever is named as participant', async () => {
   const inbox = await connectAs();
   const on = makeOnMessage(allow());
   // Sent from another client of the shared number: arrives fromMe.
-  const mine = inbound({ chat: GROUP, id: 'SENT1', fromMe: true, message: { conversation: 'Vi tittar på det' } });
+  const mine = inbound({ chat: GROUP, id: 'SENT1', fromMe: true, message: { conversation: 'We are looking into it' } });
   await on(mine.record, mine.raw);
-  const reply = inbound({ chat: GROUP, id: 'A6', participant: ANNA, message: quoting('tack', { stanzaId: 'SENT1', participant: 'someone-else@lid', quotedMessage: { conversation: 'Vi tittar på det' } }) });
+  const reply = inbound({ chat: GROUP, id: 'A6', participant: ANNA, message: quoting('thanks', { stanzaId: 'SENT1', participant: 'someone-else@lid', quotedMessage: { conversation: 'We are looking into it' } }) });
   await on(reply.record, reply.raw);
   assert.deepEqual(lines(inbox).map((l) => [l.msgId, l.addressed]), [['A6', true]]);
 });
 
 test('not addressed: a group message without mention or quote', async () => {
-  assert.equal(await addressedOf({ chat: GROUP, id: 'B1', participant: ANNA, message: { conversation: 'hej allihop' } }), false);
+  assert.equal(await addressedOf({ chat: GROUP, id: 'B1', participant: ANNA, message: { conversation: 'hi everyone' } }), false);
 });
 
 test('not addressed: a group reply to another human', async () => {
-  assert.equal(await addressedOf({ chat: GROUP, id: 'B2', participant: ANNA, message: quoting('håller med', { stanzaId: 'BOS1', participant: BO, quotedMessage: { conversation: 'Bra idé' } }) }), false);
+  assert.equal(await addressedOf({ chat: GROUP, id: 'B2', participant: ANNA, message: quoting('agreed', { stanzaId: 'BOS1', participant: BO, quotedMessage: { conversation: 'Bra idé' } }) }), false);
 });
 
 test('not addressed: a group message mentioning someone else', async () => {
-  assert.equal(await addressedOf({ chat: GROUP, id: 'B3', participant: ANNA, message: quoting('@Bo kolla', { mentionedJid: [BO] }) }), false);
+  assert.equal(await addressedOf({ chat: GROUP, id: 'B3', participant: ANNA, message: quoting('@Bo have a look', { mentionedJid: [BO] }) }), false);
 });
 
 test('addressed when information is missing: own ids unknown, or a quote without participant', () => {
