@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
 import { queueTranscription } from './speech.js';
-import { connect, appendInbox, sendText, sendDocument, sendImage, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities, bareJid } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, sendImage, sendVideo, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities, bareJid } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -320,7 +320,7 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
  * carrying the same nonce so the waiting MCP tool call can pick it up.
  */
 /** The one list of outbox command types the watcher hands to handleSendCommand. A type handled there but missing here is silently skipped. */
-export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice', 'react', 'delete', 'typing', 'read']);
+export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-video', 'send-voice', 'react', 'delete', 'typing', 'read']);
 
 /**
  * The message keys a read command marks: {remoteJid, id, fromMe:false, participant}. In a group
@@ -365,7 +365,7 @@ const TYPING_REFRESH_MS = 10000;
 const TYPING_MAX_MS = 600000;
 const typing = new Map(); // jid -> { refresh, expire, paused }
 /** Commands that put a message in the chat, and so pause the typing indicator there around the send. */
-const MESSAGE_TYPES = new Set(['send', 'send-file', 'send-image', 'send-voice']);
+const MESSAGE_TYPES = new Set(['send', 'send-file', 'send-image', 'send-video', 'send-voice']);
 
 /** The jids currently showing typing (for tests and diagnosis). */
 export function typingJids() {
@@ -490,6 +490,26 @@ export async function handleSendCommand(cmd, config) {
           if (im.fileLength != null && Number(im.fileLength) !== bytes) problems.push(`size ${im.fileLength} != ${bytes}`);
           if (problems.length) throw new Error(`image echoed malformed (${problems.join(', ')}); msgId ${msgId}`);
           ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: { mimetype: im.mimetype, bytes: Number(im.fileLength ?? bytes) } };
+        } else {
+          ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: null, warning: 'echo-timeout: delivery unverified' };
+        }
+      } else if (cmd.type === 'send-video') {
+        // {type:'send-video', jid, nonce, path, caption?}: an MP4 sent as a video message (plays inline).
+        const { bytes } = checkSendableFile('video', cmd.path);
+        const cap = cmd.caption ? (cmd.caption.startsWith(SIG) ? cmd.caption : SIG + cmd.caption) : undefined;
+        msgId = await sendVideo(jid, cmd.path, cap);
+        // Verify what ARRIVED: the echo must be a videoMessage (not a document) with a video mimetype and our byte count.
+        const echo = await awaitEcho(msgId, cmd.echoTimeoutMs ?? 30000);
+        if (echo) {
+          const vm = echo.message?.videoMessage;
+          const problems = [];
+          if (!vm) problems.push('not a video message');
+          else {
+            if (!vm.mimetype || !vm.mimetype.startsWith('video/')) problems.push(`mimetype ${vm.mimetype || 'missing'}`);
+            if (vm.fileLength != null && Number(vm.fileLength) !== bytes) problems.push(`size ${vm.fileLength} != ${bytes}`);
+          }
+          if (problems.length) throw new Error(`video echoed malformed (${problems.join(', ')}); msgId ${msgId}`);
+          ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: { mimetype: vm.mimetype, bytes: Number(vm.fileLength ?? bytes), seconds: vm.seconds ?? null } };
         } else {
           ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, verified: null, warning: 'echo-timeout: delivery unverified' };
         }

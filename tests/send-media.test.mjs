@@ -141,7 +141,7 @@ test('(m6) a real MCP client over stdio sees send_chat_document and send_chat_im
   await client.connect(transport);
   try {
     const names = (await client.listTools()).tools.map((t) => t.name);
-    for (const n of ['send_chat_document', 'send_chat_image', 'send_chat_voice_note', 'send_chat_message', 'react_to_message']) assert.ok(names.includes(n), `${n} must be exposed`);
+    for (const n of ['send_chat_document', 'send_chat_image', 'send_chat_video', 'send_chat_voice_note', 'send_chat_message', 'react_to_message']) assert.ok(names.includes(n), `${n} must be exposed`);
     const refused = await client.callTool({ name: 'send_chat_image', arguments: { jid: '9999999999@s.whatsapp.net', path: '/nope.png' } });
     assert.equal(refused.isError, true, 'a refusal reaches the model as a readable error result');
   } finally {
@@ -298,4 +298,87 @@ test('a text send carries its mentions, and a bad or untagged mention is refused
   assert.equal(err('m3').ok, false); assert.match(err('m3').error, /invalid mention jid/);
   assert.equal(err('m4').ok, false, 'a longer number in the text does not satisfy the mention'); assert.match(err('m4').error, /lacks @<number>/);
   assert.equal(err('m5').ok, false); assert.match(err('m5').error, /expected an array/);
+});
+
+test('(x1) send_chat_video refuses non-mp4, oversize and canPost:false before touching outbox', async () => {
+  const F = filesDir();
+  const dir = home([{ jid: POST, name: 'Docs', canPost: true }, { jid: READONLY, name: 'RO', canPost: false }]);
+  const { sendChatVideo } = await import('../src/mcp-server.js');
+  const { MAX_VIDEO_BYTES } = await import('../src/wa-client.js');
+  const mov = path.join(F, 'clip.mov'); fs.writeFileSync(mov, 'mov');
+  const png = path.join(F, 'still.png'); fs.writeFileSync(png, 'png');
+  const ok = path.join(F, 'clip.mp4'); fs.writeFileSync(ok, 'mp4');
+  const big = path.join(F, 'huge.mp4'); fs.writeFileSync(big, ''); fs.truncateSync(big, MAX_VIDEO_BYTES + 1);
+  await assert.rejects(() => sendChatVideo({ jid: POST, path: mov }), /must be an \.mp4/);
+  await assert.rejects(() => sendChatVideo({ jid: POST, path: png }), /must be an \.mp4/);
+  await assert.rejects(() => sendChatVideo({ jid: POST, path: big }), /the limit is/);
+  await assert.rejects(() => sendChatVideo({ jid: READONLY, path: ok }), /canPost:false/);
+  await assert.rejects(() => sendChatVideo({ jid: POST, path: 'clip.mp4' }), /absolute path/);
+  assert.equal(outboxLines(dir).length, 0, 'no refused send may reach the outbox');
+});
+
+test('(x2) send_chat_video round-trips: inline video payload (not a document), signed caption, echo-verified ack', async () => {
+  const F = filesDir();
+  const dir = home([{ jid: POST, name: 'Docs', canPost: true }]);
+  const { connect } = await import('../src/wa-client.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const { sendChatVideo } = await import('../src/mcp-server.js');
+  const vid = path.join(F, 'sample.mp4'); fs.writeFileSync(vid, 'mp4-bytes-12345');
+  const [res, cmd] = await Promise.all([sendChatVideo({ jid: POST, path: vid, caption: 'first cut' }), pumpOnce(dir)]);
+  assert.equal(cmd.type, 'send-video');
+  const sent = createdSockets.at(-1).__sent.at(-1);
+  assert.ok(sent.content.video, 'must be sent as a video message, not a document');
+  assert.equal(sent.content.document, undefined);
+  assert.equal(sent.content.mimetype, 'video/mp4');
+  assert.match(String(sent.content.caption), /^\u{1F916} first cut$/u);
+  assert.equal(res.sent, true);
+  assert.deepEqual(res.verified, { mimetype: 'video/mp4', bytes: 15, seconds: 3 });
+});
+
+test('(x3) the daemon re-checks send-video and verifies what arrived: wrong type, wrong size, document echo -> ok:false; silent echo -> unverified', async () => {
+  const F = filesDir();
+  const dir = home([{ jid: POST, name: 'Docs', canPost: true }, { jid: READONLY, name: 'RO', canPost: false }]);
+  const { connect } = await import('../src/wa-client.js');
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  await connect({ reconnect: false, onMessage: () => {} });
+  const { handleSendCommand, OUTBOX_TYPES } = await import('../src/daemon.js');
+  const { loadConfig } = await import('../src/config.js');
+  assert.ok(OUTBOX_TYPES.has('send-video'), 'the outbox watcher must dispatch send-video');
+  const sock = createdSockets.at(-1);
+  const vid = path.join(F, 'a.mp4'); fs.writeFileSync(vid, 'mp4-bytes');
+  const webm = path.join(F, 'a.webm'); fs.writeFileSync(webm, 'webm');
+  const sentBefore = sock.__sent.length;
+  await handleSendCommand({ ts: Date.now(), type: 'send-video', jid: POST, path: webm, nonce: 'w0' }, loadConfig());
+  await handleSendCommand({ ts: Date.now(), type: 'send-video', jid: READONLY, path: vid, nonce: 'w1' }, loadConfig());
+  assert.equal(sock.__sent.length, sentBefore, 'a refused video never reaches WhatsApp');
+  sock.__echoMode = 'wrongsize';
+  await handleSendCommand({ ts: Date.now(), type: 'send-video', jid: POST, path: vid, nonce: 'w2', echoTimeoutMs: 2000 }, loadConfig());
+  sock.__echoMode = 'asdocument';
+  await handleSendCommand({ ts: Date.now(), type: 'send-video', jid: POST, path: vid, nonce: 'w3', echoTimeoutMs: 2000 }, loadConfig());
+  sock.__echoMode = 'wrongmime';
+  await handleSendCommand({ ts: Date.now(), type: 'send-video', jid: POST, path: vid, nonce: 'w5', echoTimeoutMs: 2000 }, loadConfig());
+  sock.__echoMode = 'silent';
+  await handleSendCommand({ ts: Date.now(), type: 'send-video', jid: POST, path: vid, nonce: 'w4', echoTimeoutMs: 300 }, loadConfig());
+  const acks = fs.readFileSync(path.join(dir, 'inbox.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'send-ack');
+  const by = (n) => acks.find((a) => a.nonce === n);
+  assert.equal(by('w0').ok, false); assert.match(by('w0').error, /\.mp4/);
+  assert.equal(by('w1').ok, false); assert.match(by('w1').error, /canPost/);
+  assert.equal(by('w2').ok, false); assert.match(by('w2').error, /size/);
+  assert.equal(by('w3').ok, false); assert.match(by('w3').error, /not a video message/);
+  assert.equal(by('w5').ok, false); assert.match(by('w5').error, /mimetype/);
+  assert.equal(by('w4').ok, true); assert.equal(by('w4').verified, null); assert.match(by('w4').warning, /echo-timeout/);
+});
+
+test('(x4) probeVideo reads duration and frame size from ffprobe output, and gives {} when ffprobe is missing or fails', async () => {
+  const F = filesDir();
+  const { probeVideo } = await import('../src/wa-client.js');
+  const fake = path.join(F, 'ffprobe');
+  fs.writeFileSync(fake, '#!/bin/sh\necho \'{"streams":[{"width":1080,"height":1920}],"format":{"duration":"13.08"}}\'\n', { mode: 0o755 });
+  const bad = path.join(F, 'ffprobe-bad');
+  fs.writeFileSync(bad, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const vid = path.join(F, 'v.mp4'); fs.writeFileSync(vid, 'x');
+  assert.deepEqual(await probeVideo(vid, fake), { seconds: 13, width: 1080, height: 1920 });
+  assert.deepEqual(await probeVideo(vid, bad), {});
+  assert.deepEqual(await probeVideo(vid, path.join(F, 'no-such-binary')), {});
 });

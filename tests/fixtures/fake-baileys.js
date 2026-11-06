@@ -33,6 +33,10 @@ export default function makeWASocket(_config) {
           ? { audioMessage: { mimetype: content.mimetype, ptt: mode === 'notptt' ? false : !!content.ptt, fileLength: mode === 'wrongsize' ? content.audio.length + 1 : content.audio.length } }
           : content.image
           ? { imageMessage: { mimetype: content.mimetype, fileLength: mode === 'wrongsize' ? content.image.length + 1 : content.image.length, caption: content.caption } }
+          : content.video
+          ? (mode === 'asdocument'
+              ? { documentMessage: { fileName: 'video.mp4', mimetype: content.mimetype, fileLength: content.video.length } }
+              : { videoMessage: { mimetype: mode === 'wrongmime' ? 'application/octet-stream' : content.mimetype, fileLength: mode === 'wrongsize' ? content.video.length + 1 : content.video.length, seconds: content.seconds ?? 3, caption: content.caption } })
           : content.document
           ? { documentMessage: mode === 'nameless'
               ? { fileLength: content.document.length }

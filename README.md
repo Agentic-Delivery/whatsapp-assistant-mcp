@@ -191,7 +191,7 @@ automatically; a lock held by a live process is refused rather than raced.
 
 ## Verified sends
 
-Every `send`/`send-file`/`send-image`/`send-voice` ack is **echo-verified**: WhatsApp reflects each sent
+Every `send`/`send-file`/`send-image`/`send-video`/`send-voice` ack is **echo-verified**: WhatsApp reflects each sent
 message back to the daemon, and that echo is exactly what recipients receive. The
 ack therefore reports what *arrived*, not what was attempted — `verified:
 {fileName, mimetype, bytes}` for documents (the echo must carry a file name, a real
@@ -207,8 +207,9 @@ delivery is always visible as such.
 
 `send_chat_document` sends a file as a document; `send_chat_image` sends a PNG or
 JPEG as an image message, so it shows inline in the chat (a screenshot, a rendered
-design). Both use the same allowlist and `canPost` gate and the same echo-verified
-ack as text; `send_chat_voice_note` sends a voice note. The MCP server checks every file before writing anything to the
+design); `send_chat_video` sends an MP4 as a video message, so it plays inline
+instead of arriving as a file to download. All use the same allowlist and `canPost`
+gate and the same echo-verified ack as text; `send_chat_voice_note` sends a voice note. The MCP server checks every file before writing anything to the
 outbox, and the daemon checks it again before sending (this applies to raw
 `send-file` commands too):
 
@@ -222,7 +223,15 @@ outbox, and the daemon checks it again before sending (this applies to raw
   extension, not by inspecting the bytes); convert with `ffmpeg -i in.wav -c:a libopus
   -b:a 32k -ac 1 out.ogg`; a voice note has no caption, so the agent marker cannot be
   stamped on it, and the recording itself should make clear it comes from an assistant;
-- limits: 100 MB for documents, 16 MB for images and voice notes;
+- videos must be `.mp4` (H.264 video with AAC audio plays on every client); convert
+  with `ffmpeg -i in.mov -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart
+  out.mp4`, or send other containers as a document. The ack is `ok:false` if the echo
+  is not a video message (a video that arrives as a document is a failed send).
+  With `ffmpeg` and `ffprobe` on the daemon's `PATH` the recipient sees a preview frame
+  and the length before playing (`WA_FFPROBE` points at another ffprobe); without them
+  the video is still sent. A systemd user unit does not inherit your shell's `PATH`, so set
+  `Environment=PATH=...` there if ffmpeg lives in, for example, `~/.local/bin`;
+- limits: 100 MB for documents, 64 MB for videos, 16 MB for images and voice notes;
 - nothing inside the bridge's own state directory (`~/.whatsapp-assistant`: auth
   keys, inbox, outbox, downloads) can be sent, symlinks included, so a manipulated
   request cannot send the account's session keys out. To forward a downloaded file,
@@ -235,6 +244,7 @@ The raw outbox commands, for scripts that run next to the daemon:
 | send a text | `{"type":"send", "jid", "nonce", "text", "mentions?", "quote?"}` |
 | send a document | `{"type":"send-file", "jid", "nonce", "path", "fileName?", "caption?"}` |
 | send an image | `{"type":"send-image", "jid", "nonce", "path", "caption?"}` |
+| send a video | `{"type":"send-video", "jid", "nonce", "path", "caption?"}` (`.mp4`) |
 | send a voice note | `{"type":"send-voice", "jid", "nonce", "path"}` (Ogg/Opus `.ogg`) |
 | delete one of this account's own messages for everyone | `{"type":"delete", "jid", "nonce", "msgId"}` |
 | show or stop "typing…" | `{"type":"typing", "jid", "nonce", "on"}` |
@@ -349,6 +359,7 @@ a `retention` block nothing is ever deleted.
 | `poll_chats` | Messages that arrived since the last call, grouped by chat jid; the read position is persisted, so each message is returned exactly once |
 | `send_chat_document` | Sends a file as a document, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
 | `send_chat_image` | Sends a PNG or JPEG as an inline image message, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
+| `send_chat_video` | Sends an MP4 as an inline video message, with an optional caption, and waits for the echo-verified ack; requires `canPost: true` |
 | `send_chat_voice_note` | Sends an Ogg/Opus `.ogg` file as a voice note (plays inline like a recorded message) and waits for the echo-verified ack; requires `canPost: true` |
 | `speak_voice_note` | Speaks text (at most 2000 characters, `MAX_SPEAK_CHARS` in `src/speech.js`) with the configured voice and sends it as a voice note; requires `canPost: true` and `speech.speak` (see "Speech") |
 | `react_to_message` | Puts an emoji reaction on one message (or removes it with an empty emoji) via the daemon and waits for its ack; requires `canPost: true` |

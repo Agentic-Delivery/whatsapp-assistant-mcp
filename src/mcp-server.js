@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Stdio MCP server (name: whatsapp-assistant). Exposes nine tools: list_chats,
+// Stdio MCP server (name: whatsapp-assistant). Exposes ten tools: list_chats,
 // read_chat_messages, poll_chats, send_chat_message, send_chat_document,
-// send_chat_image, send_chat_voice_note, speak_voice_note and react_to_message.
+// send_chat_image, send_chat_video, send_chat_voice_note, speak_voice_note and react_to_message.
 //
 // This process NEVER opens its own Baileys connection -- Baileys refuses a second
 // simultaneous connection against the same auth session, and the daemon (src/daemon.js)
@@ -29,6 +29,9 @@ const SEND_ACK_TIMEOUT_MS = 15000;
 const SEND_ACK_POLL_MS = 200;
 // A file has to upload before WhatsApp echoes it back, so file sends wait longer for the ack.
 const FILE_ACK_TIMEOUT_MS = 90000;
+// A video is up to 64 MB: its upload alone can outlast the document wait, and a timeout the
+// daemon then completes invites a retry that delivers the video twice.
+const VIDEO_ACK_TIMEOUT_MS = 300000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -152,12 +155,12 @@ function postableChat(jid, verb) {
   return chat;
 }
 
-async function sendFileCommand(command, what) {
+async function sendFileCommand(command, what, timeoutMs = FILE_ACK_TIMEOUT_MS) {
   const nonce = crypto.randomUUID();
   appendOutboxCommand({ ts: Date.now(), nonce, ...command });
-  const ack = await waitForAck(nonce, FILE_ACK_TIMEOUT_MS);
+  const ack = await waitForAck(nonce, timeoutMs);
   if (!ack) {
-    throw new Error(`Timed out waiting ${FILE_ACK_TIMEOUT_MS / 1000}s for the daemon to send the ${what}. Is 'wa-daemon' running?`);
+    throw new Error(`Timed out waiting ${timeoutMs / 1000}s for the daemon to send the ${what}. Is 'wa-daemon' running? The send may still complete: check the chat before retrying.`);
   }
   if (!ack.ok) {
     throw new Error(`Send failed: ${ack.error || 'unknown error'}`);
@@ -185,6 +188,16 @@ export async function sendChatImage({ jid, path: filePath, caption }) {
   postableChat(jid, 'sending');
   checkSendableFile('image', filePath);
   return sendFileCommand({ type: 'send-image', jid, path: filePath, ...(caption ? { caption } : {}) }, 'image');
+}
+
+/**
+ * send_chat_video: sends an MP4 as a video message, so it plays inline in the chat
+ * instead of arriving as a file the recipient has to download first.
+ */
+export async function sendChatVideo({ jid, path: filePath, caption }) {
+  postableChat(jid, 'sending');
+  checkSendableFile('video', filePath);
+  return sendFileCommand({ type: 'send-video', jid, path: filePath, ...(caption ? { caption } : {}) }, 'video', VIDEO_ACK_TIMEOUT_MS);
 }
 
 /**
@@ -416,6 +429,25 @@ export function buildServer() {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     guard(({ jid, path: filePath, caption }) => sendChatImage({ jid, path: filePath, caption })),
+  );
+
+  server.registerTool(
+    'send_chat_video',
+    {
+      title: 'Send a video to a WhatsApp chat',
+      description:
+        'Sends an MP4 as a video message, so it plays inline in the chat (use send_chat_document ' +
+        'for other containers), to an allowlisted chat that has canPost enabled, with an optional ' +
+        'caption. path must be absolute and readable by the daemon\'s user; at most 64 MB. Waits for ' +
+        'the delivery to be confirmed. Real people see this immediately; it cannot be unsent.',
+      inputSchema: {
+        jid: z.string().describe('WhatsApp chat jid, must be allowlisted with canPost: true'),
+        path: z.string().min(1).describe('Absolute path to an .mp4 file (H.264/AAC plays on every client)'),
+        caption: z.string().optional().describe('Optional text shown under the video'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    guard(({ jid, path: filePath, caption }) => sendChatVideo({ jid, path: filePath, caption })),
   );
 
   server.registerTool(

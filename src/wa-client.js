@@ -10,6 +10,7 @@
 // including from mcp-server.js, which must NEVER open its own Baileys connection.
 
 import fs from 'node:fs';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pino from 'pino';
@@ -587,6 +588,7 @@ export function mimetypeFor(fileName) {
 export const MAX_DOCUMENT_BYTES = 100 * 1024 * 1024;
 export const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_VOICE_BYTES = 16 * 1024 * 1024;
+export const MAX_VIDEO_BYTES = 64 * 1024 * 1024;
 /** Image types sent as an inline image message (anything else goes as a document). */
 export const IMAGE_MIMETYPES = new Set(['image/png', 'image/jpeg']);
 
@@ -637,6 +639,14 @@ export function checkSendableFile(kind, filePath, fileName) {
     if (st.size > MAX_IMAGE_BYTES) throw new Error(`image is ${st.size} bytes; the limit is ${MAX_IMAGE_BYTES}.`);
     return { bytes: st.size, mimetype: mimetypeFor(filePath) };
   }
+  if (kind === 'video') {
+    // Only MP4 (H.264/AAC) plays inline on every client; other containers go as a document.
+    if (path.extname(filePath).toLowerCase() !== '.mp4') {
+      throw new Error(`a video must be an .mp4 file (got ${path.basename(filePath)}); convert with: ffmpeg -i in.mov -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart out.mp4, or send it as a document.`);
+    }
+    if (st.size > MAX_VIDEO_BYTES) throw new Error(`video is ${st.size} bytes; the limit is ${MAX_VIDEO_BYTES}. Re-encode at a lower bitrate or send it as a document.`);
+    return { bytes: st.size, mimetype: 'video/mp4' };
+  }
   if (mimetype === 'application/octet-stream') {
     throw new Error(`"${name}" does not have an accepted extension (${Object.keys(MIMETYPES).map((e) => '.' + e).join(' ')}); the recipient's client opens the file by its extension. Rename the file or pass fileName.`);
   }
@@ -653,6 +663,47 @@ export async function sendImage(jid, filePath, caption) {
   const result = await sockRef.sendMessage(jid, {
     image: buffer,
     mimetype: mimetypeFor(filePath),
+    ...(caption ? { caption } : {}),
+  });
+  return result?.key?.id || null;
+}
+
+/**
+ * Duration and frame size of a video via ffprobe, when it is on the daemon's PATH.
+ * Baileys computes neither for video, and without them the recipient sees no length.
+ * Returns {} when ffprobe is missing or fails: the video is still sent.
+ */
+export function probeVideo(filePath, bin = process.env.WA_FFPROBE || 'ffprobe') {
+  return new Promise((resolve) => {
+    execFile(bin, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height:format=duration', '-of', 'json', filePath],
+      { timeout: 10000 }, (err, stdout) => {
+        if (err) return resolve({});
+        try {
+          const j = JSON.parse(stdout);
+          const st = j.streams?.[0] || {};
+          const out = {};
+          const secs = Math.round(Number(j.format?.duration));
+          if (secs > 0) out.seconds = secs;
+          if (st.width > 0 && st.height > 0) { out.width = st.width; out.height = st.height; }
+          resolve(out);
+        } catch {
+          resolve({});
+        }
+      });
+  });
+}
+
+/** Sends an MP4 as a video message, so it plays inline in the chat. Daemon-only. */
+export async function sendVideo(jid, filePath, caption) {
+  if (!sockRef) {
+    throw new Error('No active WhatsApp connection. sendVideo() must run inside the daemon process.');
+  }
+  const buffer = fs.readFileSync(filePath);
+  const meta = await probeVideo(filePath);
+  const result = await sockRef.sendMessage(jid, {
+    video: buffer,
+    mimetype: 'video/mp4',
+    ...meta,
     ...(caption ? { caption } : {}),
   });
   return result?.key?.id || null;
