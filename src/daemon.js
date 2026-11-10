@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
 import { queueTranscription } from './speech.js';
-import { connect, appendInbox, sendText, sendDocument, sendImage, sendVideo, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities, bareJid } from './wa-client.js';
+import { connect, appendInbox, sendText, sendDocument, sendImage, sendVideo, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, editOwnMessage, awaitNack, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities, bareJid } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
 const OUTBOX_POLL_MS = 2000;
@@ -320,7 +320,7 @@ export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, befo
  * carrying the same nonce so the waiting MCP tool call can pick it up.
  */
 /** The one list of outbox command types the watcher hands to handleSendCommand. A type handled there but missing here is silently skipped. */
-export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-video', 'send-voice', 'react', 'delete', 'typing', 'read']);
+export const OUTBOX_TYPES = new Set(['send', 'send-file', 'send-image', 'send-video', 'send-voice', 'react', 'delete', 'edit', 'typing', 'read']);
 
 /**
  * The message keys a read command marks: {remoteJid, id, fromMe:false, participant}. In a group
@@ -365,6 +365,8 @@ const TYPING_REFRESH_MS = 10000;
 const TYPING_MAX_MS = 600000;
 const typing = new Map(); // jid -> { refresh, expire, paused }
 /** Commands that put a message in the chat, and so pause the typing indicator there around the send. */
+// WhatsApp lets a sender edit a message for about 15 minutes; past that an edit gets a warning, not a refusal.
+const EDIT_WINDOW_MS = 15 * 60 * 1000;
 const MESSAGE_TYPES = new Set(['send', 'send-file', 'send-image', 'send-video', 'send-voice']);
 
 /** The jids currently showing typing (for tests and diagnosis). */
@@ -476,6 +478,25 @@ export async function handleSendCommand(cmd, config) {
         // fromMe is forced true inside deleteOwnMessage, so this can never remove another person's message.
         msgId = await deleteOwnMessage(jid, cmd.msgId);
         ack = { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, deleted: cmd.msgId };
+      } else if (cmd.type === 'edit') {
+        // {type:'edit', jid, nonce, msgId, text}: replaces the text of one of OUR OWN earlier messages.
+        // fromMe is forced true inside editOwnMessage. WhatsApp accepts edits for about 15 minutes;
+        // the window is not enforced here, but an older original gets a warning and a server
+        // refusal (error ack) becomes ok:false.
+        if (typeof cmd.msgId !== 'string' || !cmd.msgId) throw new Error('edit needs msgId: the id of a message this account sent');
+        if (typeof cmd.text !== 'string' || !cmd.text.trim()) throw new Error('edit needs text: a non-empty string');
+        const signed = cmd.text.startsWith(SIG) ? cmd.text : SIG + cmd.text;
+        msgId = await editOwnMessage(jid, cmd.msgId, signed);
+        const [echo, nack] = await Promise.all([awaitEcho(msgId, cmd.echoTimeoutMs ?? 15000), awaitNack(msgId, cmd.nackWaitMs ?? 2000)]);
+        if (nack) throw new Error(`WhatsApp refused the edit of ${cmd.msgId} (error ${nack}); edits are only accepted for about 15 minutes after sending, and only on this account's own text messages`);
+        const original = tailJsonLines(inboxPath(), 1, (r) => r.chatJid === jid && r.fromMe && !r.type && r.msgId === cmd.msgId)[0];
+        const ageMs = original?.ts ? Date.now() - original.ts : null;
+        const late = ageMs != null && ageMs > EDIT_WINDOW_MS ? { warning: `edit-window: the original was sent ${Math.round(ageMs / 60000)} min ago; WhatsApp may ignore edits after about 15 min` } : {};
+        const body = echo?.message?.protocolMessage?.editedMessage || echo?.message;
+        const echoed = body?.conversation ?? body?.extendedTextMessage?.text ?? null;
+        ack = echo
+          ? { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, edited: cmd.msgId, verified: { text: echoed === signed }, ...late }
+          : { ts: Date.now(), type: 'send-ack', nonce, jid, ok: true, msgId, edited: cmd.msgId, verified: null, warning: 'echo-timeout: delivery unverified' };
       } else if (cmd.type === 'send-image') {
         // {type:'send-image', jid, nonce, path, caption?}: a PNG/JPEG sent as an image message (renders inline).
         const { bytes } = checkSendableFile('image', cmd.path);

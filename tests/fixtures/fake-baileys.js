@@ -22,6 +22,8 @@ export default function makeWASocket(_config) {
     ev,
     user: { id: 'fake-self@s.whatsapp.net' },
     sendMessage: async (jid, content, options) => {
+      // __sendError makes the next sendMessage reject, as Baileys does on a failed relay.
+      if (sock.__sendError) { const e = sock.__sendError; sock.__sendError = null; throw e; }
       const msgId = `fake-msg-${sent.length + 1}`;
       sent.push({ jid, content, msgId, options });
       // Mirror WhatsApp: every send is reflected back as a fromMe upsert. __echoMode
@@ -41,8 +43,16 @@ export default function makeWASocket(_config) {
           ? { documentMessage: mode === 'nameless'
               ? { fileLength: content.document.length }
               : { fileName: content.fileName, mimetype: content.mimetype, fileLength: content.document.length, caption: content.caption } }
+          : content.edit
+          // Baileys wraps an edit as protocolMessage(MESSAGE_EDIT = 14) carrying the new text.
+          ? { protocolMessage: { key: content.edit, type: 14, editedMessage: { conversation: content.text } } }
           : { conversation: content.text };
         setTimeout(() => ev.emit('messages.upsert', { messages: [{ key: { remoteJid: jid, fromMe: true, id: msgId }, message }] }), 0);
+      }
+      // __nackCode models the server refusing the stanza: Baileys emits messages.update with status ERROR (0).
+      if (sock.__nackCode) {
+        const code = sock.__nackCode;
+        setTimeout(() => ev.emit('messages.update', [{ key: { remoteJid: jid, fromMe: true, id: msgId }, update: { status: 0, messageStubParameters: [code] } }]), 5);
       }
       return { key: { id: msgId } };
     },
