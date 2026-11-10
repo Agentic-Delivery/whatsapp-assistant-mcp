@@ -246,6 +246,7 @@ The raw outbox commands, for scripts that run next to the daemon:
 | send an image | `{"type":"send-image", "jid", "nonce", "path", "caption?"}` |
 | send a video | `{"type":"send-video", "jid", "nonce", "path", "caption?"}` (`.mp4`) |
 | send a voice note | `{"type":"send-voice", "jid", "nonce", "path"}` (Ogg/Opus `.ogg`) |
+| edit the text of one of this account's own messages | `{"type":"edit", "jid", "nonce", "msgId", "text"}` |
 | delete one of this account's own messages for everyone | `{"type":"delete", "jid", "nonce", "msgId"}` |
 | show or stop "typing…" | `{"type":"typing", "jid", "nonce", "on"}` |
 | mark messages read (blue ticks) | `{"type":"read", "jid", "nonce", "msgIds", "participants?"}` |
@@ -262,6 +263,15 @@ preview). The ack is the same as for any text.
 `typing` with `on:true` shows "typing…" in the chat and keeps it up (refreshed every 10 s)
 until `on:false` or 600 s, then the chat shows paused. It is meant to cover a whole turn: a
 message sent to that chat pauses it just before the message and resumes it afterwards. It acks `ok:true, typing:<on>` and obeys the allowlist and `canPost`.
+
+`edit` replaces the text of a message this account sent (`msgId` is the id from that
+message's ack); it never targets anyone else's message. The new text gets the agent marker
+like any text. It is acked like `send`: `ok:true, msgId:<id of the edit>, edited:<msgId>,
+verified:{text}`. WhatsApp only accepts edits for about 15 minutes after sending. The bridge
+does not enforce that: when the original's record in `inbox.jsonl` is older, the ack carries
+`warning: "edit-window: ..."`; when WhatsApp answers the edit with an error, the ack is
+`ok:false` with an `error` that names the code. An edit past the window that WhatsApp
+accepts without an error may still not show for recipients. It obeys the allowlist and `canPost`.
 
 `delete` can only remove a message this account sent; it never touches anyone else's.
 Its ack (`ok:true, deleted: <msgId>`) means the revoke was sent, not that the id

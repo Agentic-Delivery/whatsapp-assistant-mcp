@@ -357,6 +357,20 @@ export async function deleteOwnMessage(jid, msgId) {
   return result?.key?.id || null;
 }
 
+/**
+ * Edits one of OUR OWN text messages (WhatsApp "edit", allowed for about 15 minutes after
+ * sending). fromMe is forced true and no participant is set, so this can never target anyone
+ * else's message. Returns the id of the edit (protocol) message. Daemon-only.
+ */
+export async function editOwnMessage(jid, msgId, text) {
+  if (!sockRef) throw new Error('No active WhatsApp connection. editOwnMessage() must run inside the daemon process.');
+  if (typeof msgId !== 'string' || !msgId) throw new Error('edit needs msgId: the id of a message this account sent');
+  if (typeof text !== 'string' || !text.trim()) throw new Error('edit needs text: a non-empty string');
+  const key = { remoteJid: jid, id: msgId, fromMe: true };
+  const result = await sockRef.sendMessage(jid, { text, edit: key });
+  return result?.key?.id || null;
+}
+
 export function extractText(rawMessage) {
   const message = unwrapMessage(rawMessage);
   if (!message) return '[unknown]';
@@ -394,6 +408,18 @@ export function awaitEcho(msgId, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const t = setTimeout(() => { pendingEchoes.delete(msgId); resolve(null); }, timeoutMs);
     pendingEchoes.set(msgId, (raw) => { clearTimeout(t); pendingEchoes.delete(msgId); resolve(raw); });
+  });
+}
+
+// Server refusals: WhatsApp answers a stanza it rejects with an error ack, which Baileys
+// surfaces as messages.update {key:{fromMe, id}, update:{status: 0 (ERROR), messageStubParameters:[code]}}.
+// A sender that wants to report a refusal waits (bounded) for one on its message id.
+const pendingNacks = new Map();
+export function awaitNack(msgId, timeoutMs = 2000) {
+  if (!msgId) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { pendingNacks.delete(msgId); resolve(null); }, timeoutMs);
+    pendingNacks.set(msgId, (code) => { clearTimeout(t); pendingNacks.delete(msgId); resolve(code); });
   });
 }
 const chatCache = new Map();
@@ -843,6 +869,16 @@ export async function connect(opts = {}) {
             onMessage(record, raw);
           } catch {
             // A handler bug must never take down the connection loop.
+          }
+        }
+      });
+
+      sock.ev.on('messages.update', (updates) => {
+        for (const u of updates || []) {
+          const id = u?.key?.id;
+          // WAMessageStatus.ERROR is 0: the server refused what we sent.
+          if (u?.key?.fromMe && id && pendingNacks.has(id) && u.update?.status === 0) {
+            pendingNacks.get(id)(String(u.update.messageStubParameters?.[0] ?? 'unknown'));
           }
         }
       });
