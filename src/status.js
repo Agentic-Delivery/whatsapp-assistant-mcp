@@ -15,7 +15,7 @@ export function isStatusCommand(record) {
 }
 
 /** The report text to send, or a short reason it is unavailable. `now` in ms. */
-export function readStatusReport(statusFile, { now = Date.now(), maxAgeMs = 5 * 60_000 } = {}) {
+export function readStatusReport(statusFile, { now = Date.now(), maxAgeMs = 5 * 60_000, chatId = null } = {}) {
   let text;
   try {
     text = fs.readFileSync(statusFile, 'utf8');
@@ -23,8 +23,12 @@ export function readStatusReport(statusFile, { now = Date.now(), maxAgeMs = 5 * 
     return `${STATUS_UNAVAILABLE}: the factory has not written a report.`;
   }
   let at = null;
+  let waiting = [];
   try {
-    at = Date.parse(JSON.parse(fs.readFileSync(path.join(path.dirname(statusFile), 'status.json'), 'utf8')).at);
+    const json = JSON.parse(fs.readFileSync(path.join(path.dirname(statusFile), 'status.json'), 'utf8'));
+    at = Date.parse(json.at);
+    // Only the questions asked in THIS chat (review, 2026-11-11): a chat never sees another chat's question.
+    if (chatId && Array.isArray(json.waiting)) waiting = json.waiting.filter((w) => w && w.chatId === chatId);
   } catch {
     at = null;
   }
@@ -39,6 +43,14 @@ export function readStatusReport(statusFile, { now = Date.now(), maxAgeMs = 5 * 
   if (!offline && at !== null && now - at > maxAgeMs) {
     return `${STATUS_UNAVAILABLE}: the factory's last report is ${Math.round((now - at) / 60_000)} minutes old.`;
   }
-  const body = text.trim();
+  let body = text.trim();
+  if (waiting.length) body += `\n\nWaiting for your answer:\n${waiting.map((w) => `• since ${w.since}: ${w.question || 'a question'}`).join('\n')}`;
   return body.length > MAX_TEXT ? `${body.slice(0, MAX_TEXT - 1)}…` : body;
+}
+
+/** Who may ask: a sender on `users` (compared without device suffix). An empty list means nobody: /status is off. */
+export function statusSenderAllowed(users, senderJid) {
+  if (!Array.isArray(users) || users.length === 0 || typeof senderJid !== 'string') return false;
+  const bare = (j) => j.replace(/:\d+@/, '@');
+  return users.map(bare).includes(bare(senderJid));
 }
