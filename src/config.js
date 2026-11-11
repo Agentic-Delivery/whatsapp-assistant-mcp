@@ -110,7 +110,7 @@ export function loadConfig() {
     };
   });
 
-  return { chats: normalized, retention: parseRetention(parsed.retention, file), speech: parseSpeech(parsed.speech, file) };
+  return { chats: normalized, retention: parseRetention(parsed.retention, file), speech: parseSpeech(parsed.speech, file), ...parseStatus(parsed, file) };
 }
 
 /**
@@ -127,6 +127,25 @@ function parseRetention(r, file) {
     return r[k];
   };
   return { voiceNoteDays: num('voiceNoteDays'), voiceNoteMaxMB: num('voiceNoteMaxMB') };
+}
+
+/**
+ * Optional `/status` (owner, 2026-11-11): the factory runner's report file.
+ *   "statusFile": "/var/lib/factory/<name>/status.txt", "statusMaxAgeMinutes": 5
+ */
+function parseStatus(parsed, file) {
+  let statusFile = null;
+  if (parsed.statusFile !== undefined && parsed.statusFile !== null && parsed.statusFile !== '') {
+    if (typeof parsed.statusFile !== 'string' || !parsed.statusFile.startsWith('/')) {
+      throw new Error(`WhatsApp assistant config at ${file}: "statusFile" must be an absolute path to the runner's status.txt.`);
+    }
+    statusFile = parsed.statusFile;
+  }
+  const age = parsed.statusMaxAgeMinutes;
+  if (age !== undefined && age !== null && (typeof age !== 'number' || !(age > 0))) {
+    throw new Error(`WhatsApp assistant config at ${file}: "statusMaxAgeMinutes" must be a positive number.`);
+  }
+  return { statusFile, statusMaxAgeMinutes: age ?? 5 };
 }
 
 /** Finds an allowlist entry by exact jid match, or null if the jid isn't allowlisted. */
