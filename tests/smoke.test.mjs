@@ -287,6 +287,49 @@ test('(e7) an @-mention of THIS account is flagged mentionedMe — by contextInf
   assert.deepEqual(got.find((r) => r.msgId === 'm3').mentionedJids, ['bob@s.whatsapp.net'], 'the raw mention list is recorded for diagnosis');
 });
 
+test('(e7b) a message that yields no record, or whose handler fails, is reported through onDropped, never silent', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = 'dm-drop@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid, name: 'Drops', canPost: true }] });
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  const drops = [];
+  await connect({ reconnect: false, onDropped: (d) => drops.push(d), onMessage: (r) => {
+    if (r.msgId === 'boom') throw new Error('handler bug');
+    if (r.msgId === 'later') return Promise.reject(new Error('async bug'));
+    return undefined;
+  } });
+  const sock = createdSockets.at(-1);
+  const key = (id, fromMe = false) => ({ remoteJid: jid, fromMe, id });
+  // d1: undecryptable (Baileys hands over the key with no message and a ciphertext stub)
+  sock.ev.emit('messages.upsert', { type: 'notify', messages: [{ key: key('d1'), messageStubType: 2, messageStubParameters: ['No session'] }] });
+  sock.ev.emit('messages.upsert', { messages: [{ key: key('boom'), message: { conversation: 'x' } }] });
+  sock.ev.emit('messages.upsert', { messages: [{ key: key('later'), message: { conversation: 'y' } }] });
+  sock.ev.emit('messages.upsert', { messages: [{ key: key('ok'), message: { conversation: 'fine' } }] });
+  sock.ev.emit('messages.upsert', { messages: [{ key: key('mine', true) }] }); // our own empty echo is not a drop
+  // a group notification (subject change, stub 21) has no message either, and its parameter is the group text: not a drop
+  sock.ev.emit('messages.upsert', { type: 'append', messages: [{ key: key('g1'), messageStubType: 21, messageStubParameters: ['Secret subject'] }] });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(drops.map((d) => [d.msgId, d.reason]), [['d1', 'no-content'], ['boom', 'handler-error'], ['later', 'handler-error']]);
+  assert.equal(drops[0].stubType, 2);
+  assert.equal(drops[0].chatJid, jid);
+  assert.match(drops[2].error, /async bug/);
+});
+
+test('(e7c) an onDropped that throws never takes down message delivery', async () => {
+  const home = useTempHome();
+  process.env.WA_CLIENT_FAKE = FAKE_BAILEYS_PATH;
+  const jid = 'dm-drop2@s.whatsapp.net';
+  writeConfig(home, { chats: [{ jid, name: 'Drops', canPost: true }] });
+  const { createdSockets } = await import('./fixtures/fake-baileys.js');
+  const got = [];
+  await connect({ reconnect: false, onDropped: () => { throw new Error('reporter bug'); }, onMessage: (r) => { got.push(r.msgId); } });
+  const sock = createdSockets.at(-1);
+  sock.ev.emit('messages.upsert', { messages: [{ key: { remoteJid: jid, fromMe: false, id: 'd1' }, messageStubType: 2 }] });
+  sock.ev.emit('messages.upsert', { messages: [{ key: { remoteJid: jid, fromMe: false, id: 'ok' }, message: { conversation: 'fine' } }] });
+  assert.deepEqual(got, ['ok']);
+});
+
 test('(e8) documents get a real mimetype by extension — docx and md are not octet-stream blobs at the receiver', async () => {
   const { mimetypeFor } = await import('../src/wa-client.js');
   assert.equal(mimetypeFor('Agreement_v0.1.docx'), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');

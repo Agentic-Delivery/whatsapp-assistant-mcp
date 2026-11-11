@@ -769,6 +769,12 @@ async function main() {
         canPost: (jid) => !!findChat(config, jid)?.canPost,
         send: statusSender(),
       } : null),
+      // An allowlisted chat's message that produced no inbox line is logged (ids only, never content);
+      // other chats stay unrecorded: the allowlist rule above holds for drops too.
+      onDropped: (info) => {
+        if (!info?.chatJid || !allowlist.has(info.chatJid)) return;
+        logDaemon({ ts: Date.now(), type: 'dropped', ...info });
+      },
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });

@@ -798,6 +798,9 @@ export function acquireSessionLock() {
   return release;
 }
 
+// proto.WebMessageInfo.StubType.CIPHERTEXT: Baileys marks a message it could not decrypt with this stub.
+const STUB_CIPHERTEXT = 2;
+
 export async function connect(opts = {}) {
   const {
     reconnect = true,
@@ -807,6 +810,9 @@ export async function connect(opts = {}) {
     onPairingCode = () => {},
     onConnection = () => {},
     onLoggedOut = () => {},
+    // Called when an incoming message is seen but produces no record (no decryptable content) or its
+    // handler throws. Without it both cases vanish without a trace.
+    onDropped = () => {},
   } = opts;
 
   ensureWaHome();
@@ -863,12 +869,32 @@ export async function connect(opts = {}) {
       });
 
       sock.ev.on('messages.upsert', (payload) => {
+        const dropped = (info) => {
+          try {
+            onDropped(info);
+          } catch {
+            // reporting must never take down the connection loop either
+          }
+        };
+        for (const m of payload?.messages || []) {
+          // Only a decrypt failure (stub CIPHERTEXT, whose parameter is the Signal error text) or an entry with no stub at all
+          // is a lost message. Group notifications (subject, description, participants) also arrive without `message`, and
+          // their stub parameters carry the group text itself, so they are neither reported nor copied.
+          const stub = m?.messageStubType ?? null;
+          if (m?.key && !m.message && !m.key.fromMe && (stub === null || stub === STUB_CIPHERTEXT)) {
+            dropped({ reason: 'no-content', chatJid: m.key.remoteJid || null, msgId: m.key.id || null, stubType: stub,
+              stubParameters: stub === STUB_CIPHERTEXT ? (m.messageStubParameters ?? null) : null, upsertType: payload?.type ?? null });
+          }
+        }
         for (const { record, raw } of extractMessageRecords(payload)) {
           if (raw?.key?.fromMe && pendingEchoes.has(raw.key.id)) pendingEchoes.get(raw.key.id)(raw);
+          const fail = (err) => dropped({ reason: 'handler-error', chatJid: record.chatJid, msgId: record.msgId, error: String(err?.message || err) });
           try {
-            onMessage(record, raw);
-          } catch {
-            // A handler bug must never take down the connection loop.
+            // A handler bug must never take down the connection loop, and it must never be silent.
+            const r = onMessage(record, raw);
+            if (r && typeof r.catch === 'function') r.catch(fail);
+          } catch (err) {
+            fail(err);
           }
         }
       });
