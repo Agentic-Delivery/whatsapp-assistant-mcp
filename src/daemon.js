@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
 import { queueTranscription } from './speech.js';
+import { isStatusCommand, readStatusReport, statusSenderAllowed } from './status.js';
 import { connect, appendInbox, sendText, sendDocument, sendImage, sendVideo, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, editOwnMessage, awaitNack, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities, bareJid } from './wa-client.js';
 
 const HEARTBEAT_MS = 30000;
@@ -244,13 +245,52 @@ export function splitAllowlist(config) {
   };
 }
 
-export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, beforeEach = () => {}, channel = channelFromEnv()) {
+/**
+ * `/status` (owner, 2026-11-11): a message that is only `/status` in an allowlisted chat gets the runner's report as a
+ * quoted reply, signed like every agent message, and is never written to either inbox. `status` is
+ * {file, maxAgeMs, canPost(jid), send(jid, text, quote)}; null or without a file means off. Our own sends never trigger it.
+ */
+const statusAnsweredAt = new Map();
+const STATUS_MIN_INTERVAL_MS = 60_000;
+
+/** Forgets the per-chat rate limit (tests). */
+export function clearStatusRateLimit() { statusAnsweredAt.clear(); }
+
+export function answerStatus(status, record, raw) {
+  if (!status?.file || !isStatusCommand(record) || ownMsgIds.has(record.msgId)) return null;
+  // Who may ask (review, 2026-11-11): only a sender on statusUsers; the chat's members are not enough. Anyone else's
+  // "/status", or one in a chat we may not post to, is an ordinary message and goes on as one.
+  if (!statusSenderAllowed(status.users, record.senderJid) || !status.canPost(record.chatJid)) return null;
+  const now = status.now ? status.now() : Date.now();
+  if (now - (statusAnsweredAt.get(record.chatJid) ?? -Infinity) < STATUS_MIN_INTERVAL_MS) return Promise.resolve();
+  statusAnsweredAt.set(record.chatJid, now);
+  const text = readStatusReport(status.file, { maxAgeMs: status.maxAgeMs, chatId: `wa:${record.chatJid}` });
+  const participant = raw?.key?.participant || (record.chatJid.endsWith('@g.us') && !record.fromMe ? record.senderJid : null);
+  const quote = { msgId: record.msgId, participant: participant || null, fromMe: !!record.fromMe, text: record.text };
+  return Promise.resolve(status.send(record.chatJid, text, quote)).catch((err) => {
+    logDaemon({ ts: Date.now(), type: 'status-error', jid: record.chatJid, error: String(err?.message || err) });
+  });
+}
+
+/** The default /status sender: the daemon's signature, then a quoted text send. */
+export function statusSender() {
+  const SIG = process.env.WA_AGENT_SIG || "\u{1F916} ";
+  return async (jid, text, quote) => {
+    const msgId = await sendText(jid, text.startsWith(SIG) ? text : SIG + text, [], quote);
+    rememberOwnMessage(msgId);
+    return msgId;
+  };
+}
+
+export function makeOnMessage(allowlist, onSkipped = () => {}, speech = {}, beforeEach = () => {}, channel = channelFromEnv(), status = null) {
   return (record, raw) => {
     beforeEach();
     if (!allowlist.has(record.chatJid)) {
       onSkipped(record);
       return Promise.resolve();
     }
+    const statusAnswer = answerStatus(status, record, raw);
+    if (statusAnswer) return statusAnswer;
     // A reply that quotes a message from a chat we may not read (e.g. "Reply privately" from a
     // write-only or non-allowlisted group) keeps the link but never the quoted text.
     if (record.replyToRemoteJid && record.replyToRemoteJid !== record.chatJid && !allowlist.has(record.replyToRemoteJid)) {
@@ -707,6 +747,11 @@ async function main() {
   // control, and "not stored" must mean not stored, not "stored somewhere quieter".
   let skippedCount = 0;
 
+  if (config.statusFile && !config.statusUsers?.length) {
+    // /status needs a list of who may ask; without one it stays off rather than answering anyone in a chat.
+    logDaemon({ ts: Date.now(), type: 'status-off', reason: 'statusFile is set but statusUsers is empty' });
+    console.error('/status is off: statusFile is set but statusUsers is empty.');
+  }
   const outboxStartOffset = snapshotOutboxOffset();
   let connection;
   try {
@@ -717,7 +762,13 @@ async function main() {
         if (writeOnly.has(record.chatJid)) return;
         skippedCount += 1;
         recordKnock(record);
-      }, config.speech || {}, refreshAllowlist),
+      }, config.speech || {}, refreshAllowlist, channelFromEnv(), config.statusFile && config.statusUsers?.length ? {
+        file: config.statusFile,
+        users: config.statusUsers,
+        maxAgeMs: (config.statusMaxAgeMinutes ?? 5) * 60_000,
+        canPost: (jid) => !!findChat(config, jid)?.canPost,
+        send: statusSender(),
+      } : null),
       onConnection: (update) => {
         if (update.connection === 'open' || update.connection === 'close') {
           logDaemon({ ts: Date.now(), type: 'connection', status: update.connection });

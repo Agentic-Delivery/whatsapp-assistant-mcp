@@ -439,6 +439,10 @@ sent ids lives in memory only, so after a restart the participant check carries 
 alone. A reader that does not know the field treats a line as addressed, which is what older
 lines without it mean.
 
+## /status (optional)
+
+With `"statusFile"` in `wa-mcp.config.json` (an absolute path to the factory runner's `status.txt`; `status.json` beside it gives the report's time) a message whose whole text is `/status` (any case, surrounding spaces ignored) from a sender on `"statusUsers"` (person jids; being in the chat is not enough, and with no list `/status` is off and the daemon logs it) in an allowlisted chat with `canPost:true` is answered at once by the daemon itself, at most once per chat per 60 s, with no model turn: a quoted reply carrying the runner's report, signed like every agent message. The reply is the shared report plus only the factory's open questions asked in this chat (`status.json` `waiting`, chatId `wa:<jid>`), never another chat's. An answered `/status` is written to neither `inbox.jsonl` nor the channel inbox; one from anyone else goes on as an ordinary message. A report older than `"statusMaxAgeMinutes"` (default 5) reads "Status unavailable: the factory's last report is N minutes old"; a report that says the factory is offline is shown however old. The report is the runner's (vd-server `status_report`): runner state and the customer's backlog only, never a task's own text.
+
 ## Troubleshooting
 
 Four failure modes came up repeatedly during development. All four are already handled

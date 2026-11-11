@@ -110,7 +110,7 @@ export function loadConfig() {
     };
   });
 
-  return { chats: normalized, retention: parseRetention(parsed.retention, file), speech: parseSpeech(parsed.speech, file) };
+  return { chats: normalized, retention: parseRetention(parsed.retention, file), speech: parseSpeech(parsed.speech, file), ...parseStatus(parsed, file) };
 }
 
 /**
@@ -127,6 +127,33 @@ function parseRetention(r, file) {
     return r[k];
   };
   return { voiceNoteDays: num('voiceNoteDays'), voiceNoteMaxMB: num('voiceNoteMaxMB') };
+}
+
+/**
+ * Optional `/status` (owner, 2026-11-11): the factory runner's report file.
+ *   "statusFile": "/var/lib/factory/<name>/status.txt", "statusMaxAgeMinutes": 5,
+ *   "statusUsers": ["46700000000@s.whatsapp.net"]   (who may ask; empty means /status is off)
+ */
+function parseStatus(parsed, file) {
+  let statusFile = null;
+  if (parsed.statusFile !== undefined && parsed.statusFile !== null && parsed.statusFile !== '') {
+    if (typeof parsed.statusFile !== 'string' || !parsed.statusFile.startsWith('/')) {
+      throw new Error(`WhatsApp assistant config at ${file}: "statusFile" must be an absolute path to the runner's status.txt.`);
+    }
+    statusFile = parsed.statusFile;
+  }
+  const age = parsed.statusMaxAgeMinutes;
+  if (age !== undefined && age !== null && (typeof age !== 'number' || !(age > 0))) {
+    throw new Error(`WhatsApp assistant config at ${file}: "statusMaxAgeMinutes" must be a positive number.`);
+  }
+  let statusUsers = [];
+  if (parsed.statusUsers !== undefined && parsed.statusUsers !== null) {
+    if (!Array.isArray(parsed.statusUsers) || !parsed.statusUsers.every((u) => typeof u === 'string' && /^\d+@(s\.whatsapp\.net|lid)$/.test(u))) {
+      throw new Error(`WhatsApp assistant config at ${file}: "statusUsers" must be an array of person jids ("<number>@s.whatsapp.net" or "<id>@lid").`);
+    }
+    statusUsers = parsed.statusUsers;
+  }
+  return { statusFile, statusMaxAgeMinutes: age ?? 5, statusUsers };
 }
 
 /** Finds an allowlist entry by exact jid match, or null if the jid isn't allowlisted. */
