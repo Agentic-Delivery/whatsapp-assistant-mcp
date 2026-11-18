@@ -144,6 +144,17 @@ systemctl --user enable --now wa-daemon.service
 loginctl enable-linger "$USER"   # keep it running after you log out
 ```
 
+Whatever the daemon prints is kept by the service manager (the journal), so the daemon
+prints text only. The Signal library underneath reports session changes by printing whole
+session records, private keys included; the daemon and `wa-pair` replace every printed object
+except an error's stack text with `[object omitted]` and keep the message
+(`src/console-redact.js`). If you ran an earlier version as a service, your journal may hold
+such records (check with `journalctl --user -u wa-daemon | grep -c 'Closing session'`). The
+journal cannot delete one service's entries; they expire with your journald retention settings,
+and clearing them early (`sudo journalctl --rotate --vacuum-time=1s`) deletes the logs of every
+service on the machine. Treat those keys as exposed: remove the device under WhatsApp > Linked
+Devices and run `wa-pair` again.
+
 **Under WSL**, user services need systemd turned on first. Add to `/etc/wsl.conf`:
 
 ```ini

@@ -4,7 +4,11 @@
 // This is the only place a human is expected to watch stdout interactively.
 
 import qrcodeTerminal from 'qrcode-terminal';
+import { installConsoleRedaction } from './console-redact.js';
 import { connect, waHome } from './wa-client.js';
+
+// The Signal library prints whole session records; keep them off the terminal too.
+installConsoleRedaction();
 
 function parseArgs(argv) {
   const args = { code: null };

@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, findChat, configPath } from './config.js';
+import { installConsoleRedaction } from './console-redact.js';
 import { queueTranscription } from './speech.js';
 import { isStatusCommand, readStatusReport, statusSenderAllowed } from './status.js';
 import { connect, appendInbox, sendText, sendDocument, sendImage, sendVideo, sendVoiceNote, checkSendableFile, sendReaction, sendPresence, markRead, deleteOwnMessage, editOwnMessage, awaitNack, downloadDocument, pruneVoiceNotes, hasSavableMedia, awaitEcho, readNewLines, tailJsonLines, inboxPath, outboxPath, daemonLogPath, waHome, selfIdentities, bareJid } from './wa-client.js';
@@ -696,6 +697,10 @@ export function startOutboxWatcher(config, startOffset) {
   };
 }
 
+// A dependency prints whole session records (with private keys) through
+// console; nothing this process prints may carry an object. See console-redact.js.
+installConsoleRedaction();
+
 async function main() {
   const discover = process.env.WA_DISCOVER === '1';
   let config;
@@ -846,5 +851,10 @@ async function main() {
 // tooling) must get the exports without starting a real WhatsApp connection.
 import { pathToFileURL } from 'node:url';
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main();
+  // An uncaught rejection is printed by the runtime's own inspector, not through
+  // console, so it would bypass the redaction: print it here instead.
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
 }
